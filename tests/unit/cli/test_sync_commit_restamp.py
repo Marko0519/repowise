@@ -120,3 +120,17 @@ def test_a_save_on_a_running_loop_skips_the_restamp_without_raising(repo) -> Non
     asyncio.run(asyncio.wait_for(_save(), timeout=10))
     assert _state_commit(path) == new
     assert asyncio.run(_row_commit(path)) == old
+
+
+async def test_a_server_index_job_restamps_the_row_off_the_loop(repo) -> None:
+    """The job executor writes state.json through asyncio.to_thread, so the
+    restamp runs with no event loop of its own and is not skipped."""
+    from repowise.server.job_executor import _write_index_state
+
+    path, _old, new = repo
+    run = types.SimpleNamespace(
+        spec=types.SimpleNamespace(is_initial_index=False, repo_path=str(path), job_id="j")
+    )
+    await _write_index_state(run, types.SimpleNamespace(), total_pages=0)
+    assert _state_commit(path) == new
+    assert await _row_commit(path) == new
