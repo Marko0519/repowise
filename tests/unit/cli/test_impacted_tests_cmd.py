@@ -236,9 +236,26 @@ def test_list_prints_one_test_per_line(repo) -> None:
     assert result.stdout == "tests/test_a.py\n"
 
 
-def test_an_index_that_disagrees_about_its_commit_runs_everything(repo) -> None:
+def test_stamps_one_commit_apart_select_from_the_older(repo) -> None:
+    # The database row says main; state.json says feat, one commit later.
     (repo / ".repowise" / "state.json").write_text(
         json.dumps({"last_sync_commit": _git(repo, "rev-parse", "feat")}), encoding="utf-8"
+    )
+    result = _run(repo, "main...feat", "--format", "args")
+    assert result.exit_code == 0, result.output
+    assert result.stdout == "tests/test_a.py\n"
+
+
+def test_an_index_whose_stamps_diverge_runs_everything(repo) -> None:
+    _git(repo, "switch", "-q", "--orphan", "other")
+    _write(repo, {"src/b.py": "B = 2\n"})
+    _git(repo, "add", "src/b.py")
+    _git(repo, "commit", "-qm", "other")
+    other = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "switch", "-qf", "feat")
+    # The row says main, and other shares no history with it: the index is in doubt.
+    (repo / ".repowise" / "state.json").write_text(
+        json.dumps({"last_sync_commit": other}), encoding="utf-8"
     )
     result = _run(repo, "main...feat", "--format", "args")
     assert result.stdout == ":all\n"

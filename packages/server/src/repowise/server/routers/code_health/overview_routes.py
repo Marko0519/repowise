@@ -170,10 +170,11 @@ async def health_overview(
         ),
         "meta": {
             "last_indexed_at": last_indexed_at,
-            # Prefer state.json's last_sync_commit over a possibly-stale DB row
-            # so the freshness signal self-heals on read (see the /api/repos
-            # overlay). This is the extension's primary indexed-commit source.
-            "head_commit": resolve_indexed_commit(repo.head_commit, repo.local_path),
+            # The /api/repos overlay's indexed commit (state.json and the row
+            # reconciled). This is the extension's primary indexed-commit source.
+            "head_commit": (
+                resolve_indexed_commit(repo.head_commit, repo.local_path) or repo.head_commit
+            ),
             "snapshot_count": snapshot.snapshot_count,
         },
     }

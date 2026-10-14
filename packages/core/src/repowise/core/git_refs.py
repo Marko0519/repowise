@@ -28,6 +28,7 @@ __all__ = [
     "default_base",
     "files_by_ref",
     "find_path_removal",
+    "is_ancestor",
     "is_shallow",
     "list_branches",
     "refs_containing",
@@ -299,6 +300,18 @@ def ahead_behind(repo_path: str, base: str, head: str) -> tuple[int, int]:
     except ValueError:
         return (0, 0)
     return (ahead, behind)
+
+
+def is_ancestor(repo_path: str, older: str, newer: str) -> bool | None:
+    """Whether *older* is *newer* or one of its ancestors; ``None`` when git cannot answer."""
+    try:
+        _git(["merge-base", "--is-ancestor", "--end-of-options", older, newer], cwd=repo_path)
+    except subprocess.CalledProcessError as exc:
+        # Exit 1 is git's "no"; anything else is an unknown sha or no repository.
+        return False if exc.returncode == 1 else None
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    return True
 
 
 @dataclass(frozen=True)

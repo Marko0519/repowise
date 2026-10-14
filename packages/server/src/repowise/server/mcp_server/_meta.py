@@ -119,29 +119,6 @@ def read_live_head(local_path: str | None) -> str | None:
     return read_head_commit(local_path)
 
 
-def read_state_sync_commit(local_path: str | None) -> str | None:
-    """Return ``last_sync_commit`` from ``<local_path>/.repowise/state.json``.
-
-    This is the commit the most recent sync advanced to — written by every
-    ``repowise update`` path, including the fast paths ("already up to date",
-    "no changed files") that don't rebuild the DB. It is the authoritative
-    freshness marker; the ``repositories`` row can lag it when an older build's
-    fast path skipped the DB stamp. Returns ``None`` for hosted/ephemeral
-    indexes with no state file.
-    """
-    if not local_path:
-        return None
-    try:
-        import json
-
-        state_path = Path(local_path) / ".repowise" / "state.json"
-        data = json.loads(state_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    commit = data.get("last_sync_commit")
-    return commit if isinstance(commit, str) and commit else None
-
-
 def read_index_scope(local_path: str | None) -> dict[str, Any] | None:
     """Read the canonical persisted scope, or a conservative legacy projection."""
     if not local_path:
@@ -187,17 +164,17 @@ def index_scope_for_response(local_path: str | None) -> dict[str, Any] | None:
 
 
 def resolve_indexed_commit(head_commit: str | None, local_path: str | None) -> str | None:
-    """Best available "commit the index reflects" for a repo.
+    """The commit the index reflects, from ``state.json`` and the DB ``head_commit``.
 
-    Prefers the on-disk ``state.json`` ``last_sync_commit`` over the DB
-    ``head_commit`` so the freshness signal stays honest even when an older
-    build left the ``repositories`` row un-stamped — a read-time self-heal that
-    needs no ``repowise update`` first. The row is repaired for good on the next
-    update; until then this keeps ``/api/repos`` and the MCP ``_meta`` staleness
-    check from falsely reporting "index behind checkout". Falls back to the DB
-    value when there is no state file (hosted indexes).
+    One resolver with impacted-test selection (see
+    :func:`repowise.core.workspace.update.resolve_indexed_commit`), so a
+    response never names an indexed commit in ``_meta`` while its selection
+    calls the same index unknown. ``None`` when the two stamps diverge. Hosted
+    indexes have no state file and keep the DB value.
     """
-    return read_state_sync_commit(local_path) or head_commit
+    from repowise.core.workspace.update import resolve_indexed_commit as _resolve
+
+    return _resolve(Path(local_path) if local_path else None, head_commit).sha
 
 
 # (local_path, indexed_sha, live_sha) -> files changed between the two commits,
@@ -536,8 +513,7 @@ def freshness_from_repo(
 
     # ``root``: the served checkout (see served_root), resolved here when omitted.
     local_path = root or served_root(repository)
-    # Prefer state.json's last_sync_commit over a possibly-stale DB head_commit
-    # so freshness self-heals on read (see resolve_indexed_commit).
+    # state.json and the DB row reconciled by the shared resolver.
     indexed_full = resolve_indexed_commit(
         getattr(repository, "head_commit", None) or None, local_path
     )

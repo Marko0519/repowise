@@ -298,21 +298,13 @@ async def _place_tests(session, repo_id: str, out: dict) -> None:
 
 
 def _indexed_commit(repo_path, row_commit: str | None, out: dict) -> None:
-    """The commit the index describes: ``state.json`` first, then the repository row.
+    """The commit the index describes, read by the one resolver the server's freshness uses."""
+    from ..workspace.update import resolve_indexed_commit
 
-    The same order the server's freshness check reads. When both are recorded
-    and disagree, the index's own history is in doubt, so the commit is unknown.
-    """
-    from ..workspace.update import read_state_commit
-
-    state = read_state_commit(Path(repo_path))
-    if state and row_commit and state != row_commit:
-        out["index_problem"] = (
-            f"The index records two commits ({state[:7]} in state.json, {row_commit[:7]} "
-            "in its database), so what it describes is unknown; run `repowise update`."
-        )
-        return
-    out["indexed_commit"] = state or row_commit
+    resolved = resolve_indexed_commit(Path(repo_path), row_commit)
+    if resolved.problem:
+        out["index_problem"] = resolved.problem
+    out["indexed_commit"] = resolved.sha
 
 
 def _gap_routes(repo_path, change, config, repo_keys: set[str], out: dict) -> list[str]:
