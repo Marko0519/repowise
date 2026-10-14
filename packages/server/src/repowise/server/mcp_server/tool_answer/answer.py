@@ -606,7 +606,7 @@ async def get_answer(
     # Value-shaped question + a question-matched constant in the top hits →
     # the verbatim assignment line (read live by the hydrator) IS the answer.
     if _is_value_question(question) and question_ids:
-        extraction = _extract_value_answer(hits, question_ids)
+        extraction = _extract_value_answer(hits, question_ids, question)
         if extraction is not None:
             return _with_candidates(
                 build_value_payload(
