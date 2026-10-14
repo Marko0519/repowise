@@ -40,6 +40,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from repowise.core.analysis.secret_allowlist import secret_path_allowlist
 from repowise.core.analysis.security_scan import (
     SECRET_KINDS,
     SecurityScanner,
@@ -339,6 +340,7 @@ class HistorySecurityScanner:
         blobs = self._unique_blobs(repo_path, since, to)
         summary.blobs_scanned = len(blobs)
         blob_introduced_at, commit_dates = self._blob_introductions(repo_path, since, to)
+        allowlisted = secret_path_allowlist(repo_path)
 
         # Test material findings are downgraded to low severity by scan_file
         # so real keys in test files are still recorded without polluting high-severity reports.
@@ -363,7 +365,13 @@ class HistorySecurityScanner:
 
             # Elided values ("sk-...") never get here: the scan's credential
             # check rejects them on the captured value, not the snippet.
-            kept = [f for f in findings if self._passes_gate(f["kind"], secrets_only=secrets_only)]
+            dropped = SECRET_KINDS if allowlisted(path or "") else frozenset()
+            kept = [
+                f
+                for f in findings
+                if self._passes_gate(f["kind"], secrets_only=secrets_only)
+                and f["kind"] not in dropped
+            ]
             if not kept:
                 continue
 

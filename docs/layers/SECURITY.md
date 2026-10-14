@@ -213,6 +213,16 @@ the gate; they do not appear in the gate's suppressed count. Non-secret
 findings on the same line still report. A marker inside a string does not
 silence a finding.
 
+### A repository's `.gitleaks.toml`
+
+A path the root `.gitleaks.toml` allowlists has no secret findings, in the
+stored scan, the history scan or the gate. The scanner reads the `paths` of
+`[allowlist]` and `[[allowlists]]` as gitleaks matches them, plus gitleaks'
+default allowlist paths under `[extend] useDefault = true`. Entries scoped by
+`targetRules`, or by `condition = "AND"` with `regexes`, `stopwords` or
+`commits`, are not applied. The file is read from the checked-out tree, as
+gitleaks does, so a change's own allowlist entries apply to it.
+
 ### Baselines
 
 `--write-baseline FILE` records the change's findings in a committed JSON file

@@ -382,6 +382,14 @@ async def test_history_scan_on_real_repo_records_commit_provenance(
         assert m["commit_at"] is not None, "introducing commit has no date"
 
 
+async def test_history_drops_secrets_in_a_gitleaks_allowlisted_path(
+    session: AsyncSession, secret_repo: Path
+) -> None:
+    (secret_repo / ".gitleaks.toml").write_text("[allowlist]\npaths = ['''^leak\\.py$''']\n")
+    await HistorySecurityScanner(session, "repo-1").scan_history(secret_repo, secrets_only=True)
+    assert not (await session.execute(text("SELECT 1 FROM security_findings"))).all()
+
+
 async def test_history_default_skips_test_fixtures_and_placeholders(
     session: AsyncSession, secret_repo: Path
 ) -> None:
