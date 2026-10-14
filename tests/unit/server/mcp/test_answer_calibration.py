@@ -509,6 +509,12 @@ class TestValueExtractionRelevance:
         )
         assert out is not None and not out.get("exact_name")
 
+    def test_short_name_part_must_appear_in_the_question(self) -> None:
+        # The stemmer drops parts under 3 chars, so `V2` is checked as a token.
+        assert self._extract("What is the MAX limit?", "MAX_V2", "MAX_V2 = 8") is None
+        out = self._extract("What is the MAX v2 limit?", "MAX_V2", "MAX_V2 = 8")
+        assert out is not None and not out.get("exact_name")
+
 
 @pytest.mark.asyncio
 async def test_spelled_out_value_is_medium_not_high(setup_mcp, monkeypatch):

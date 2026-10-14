@@ -17,6 +17,7 @@ from sqlalchemy import select
 
 from repowise.core.persistence.models import WikiSymbol
 from repowise.server.mcp_server._query_shape import _WORD_CHAIN_RE, _identifier_shaped
+from repowise.server.mcp_server._query_terms import split_humps
 from repowise.server.mcp_server._verify import verify_and_heal
 from repowise.server.mcp_server.tool_answer.config import (
     _ENRICH_TOP_N_HITS,
@@ -161,6 +162,7 @@ def _extract_value_answer(
     """
     qids_lower = {q.lower() for q in question_ids}
     question_stems = _text_stems(question)
+    question_parts = _name_parts(question)
     spelled: dict | None = None
     for h in hits[:_ENRICH_TOP_N_HITS]:
         path = h.get("target_path")
@@ -172,12 +174,23 @@ def _extract_value_answer(
             if name.lower() in qids_lower:
                 entry["exact_name"] = True
                 return entry
-            name_stems = _text_stems(name)
-            if spelled is None and name_stems and all(
-                _stem_hit(t, question_stems) for t in name_stems
-            ):
+            if spelled is None and _question_spells(name, question_stems, question_parts):
                 spelled = entry
     return spelled
+
+
+def _name_parts(text: str) -> set[str]:
+    """Lowercased hump- and separator-split parts of *text*, short ones included."""
+    return {p.lower() for p in re.split(r"[^A-Za-z0-9]+", split_humps(text)) if p}
+
+
+def _question_spells(name: str, question_stems: set[str], question_parts: set[str]) -> bool:
+    """Whether the question's words cover every part of *name*."""
+    name_stems = _text_stems(name)
+    if not name_stems or not all(_stem_hit(t, question_stems) for t in name_stems):
+        return False
+    # _text_stems drops parts under 3 chars, so `V2` in `MAX_V2` must appear as is.
+    return all(p in question_parts for p in _name_parts(name) if len(p) < 3)
 
 
 def _symbol_def_dict(sym) -> dict:
