@@ -64,6 +64,9 @@ PASTE_CONFIG_HOSTS: tuple[str, ...] = (
     "Amp",
 )
 
+# Agents whose edits can be captured live when attribution is enabled.
+ATTRIBUTION_AGENTS: frozenset[str] = frozenset({"claude-code", "codex", "cursor"})
+
 TIER_BLURBS: dict[str, tuple[str, str]] = {
     "full": (
         "Full",
@@ -131,6 +134,7 @@ def agent_rows() -> list[dict]:
                 "hook_adapter": target.hook_adapter,
                 "session_adapter": target.session_adapter,
                 "indexing_provider": identity.indexing_provider if identity else None,
+                "attribution": target.id in ATTRIBUTION_AGENTS,
             }
         )
     return rows
@@ -238,6 +242,7 @@ _COLUMNS: tuple[tuple[str, str], ...] = (
     ("Instructions", "instructions"),
     ("Transcripts", "session_adapter"),
     ("Indexing", "indexing_provider"),
+    ("Attribution", "attribution"),
 )
 
 
@@ -321,6 +326,10 @@ def render() -> str:
         "for that agent. `Indexing` is `Yes` when the agent's own CLI can run as the",
         "LLM that writes the index, selected by its provider id (`claude_cli`, for",
         "example). It is separate from the tier: it says nothing about the session.",
+        "`Attribution` is `Yes` when repowise can record the agent's edits as they",
+        "happen, an opt-in set by `attribution.capture` and `attribution.agents`.",
+        "Every agent's own git-ai notes, Agent Trace files and commit trailers are",
+        "read either way.",
         "",
         _matrix_table(rows),
         "",
