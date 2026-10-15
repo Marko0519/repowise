@@ -200,6 +200,15 @@ def test_the_indexing_column_matches_the_identities() -> None:
         assert GEN._cell(row, "indexing_provider") == expected, row["id"]
 
 
+def test_the_attribution_column_matches_the_supported_agents() -> None:
+    """Live attribution is opt-in and only available for its supported agents."""
+    expected_agents = {"claude-code", "codex", "cursor"}
+
+    for row in GEN.agent_rows():
+        expected = "Yes" if row["id"] in expected_agents else "No"
+        assert GEN._cell(row, "attribution") == expected, row["id"]
+
+
 def test_the_hooks_column_cannot_lie() -> None:
     """A target's declared HOOKS capability agrees with its hook adapter.
 
