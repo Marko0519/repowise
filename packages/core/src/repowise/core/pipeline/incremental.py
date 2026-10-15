@@ -923,7 +923,10 @@ def run_partial_analysis(
                 "the rest keep their previous verdict[/yellow]"
             )
         if dead_code_report.total_findings:
-            log(f"Dead code findings: [yellow]{dead_code_report.total_findings}[/yellow]")
+            log(
+                f"Dead code findings: [yellow]{dead_code_report.total_findings}[/yellow]"
+                " repo-wide, every kind"
+            )
     except Exception as exc:
         log(f"[yellow]Dead code analysis skipped: {exc}[/yellow]")
     finally:
@@ -1491,6 +1494,7 @@ async def persist_incremental_commits(
     """
     from repowise.core.ingestion.git_indexer import GitIndexer
     from repowise.core.persistence.crud import (
+        clear_attribution_if_disabled,
         get_latest_commit_committed_at,
         get_repository,
         update_repo_git_totals,
@@ -1534,6 +1538,7 @@ async def persist_incremental_commits(
             await upsert_git_commits_bulk(session, repo_id, rows)
         if file_rows:
             await upsert_git_commit_files_bulk(session, repo_id, file_rows)
+    await clear_attribution_if_disabled(session, repo_id)
 
     # What the new commits did to health is scanned by the caller once this
     # transaction commits (commit_health.refresh_commit_health_after_update):
@@ -1545,6 +1550,14 @@ async def persist_incremental_commits(
     # new capture never needs a re-index to become useful.
     with timed(timings, "persist.commits.offsets"):
         await reconcile_commit_offsets(session, repo_id, indexer)
+    with timed(timings, "persist.commits.changes"):
+        from repowise.core.changes.store import reconcile_categories, refresh_changes
+
+        await refresh_changes(session, repo_id, repo_path, rebuild=False)
+        try:
+            await reconcile_categories(session, repo_id)
+        except Exception as exc:
+            logger.debug("category_reconcile_failed", error=str(exc))
 
     # Refresh the repo-level whole-history totals so age / commit / contributor
     # counts keep growing between full re-indexes (#730). Cheap git calls, and

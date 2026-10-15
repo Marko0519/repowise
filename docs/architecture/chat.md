@@ -53,7 +53,7 @@ POST /api/repos/{repo_id}/chat/messages
 +---------------------------------------+
 ```
 
-The agentic loop is in the chat router for most providers (OpenAI, Anthropic,
+The agentic loop is in the chat session engine (`chat_session.py`) for most providers (OpenAI, Anthropic,
 Ollama, LiteLLM). For Gemini, the loop runs inside `stream_chat()` using native
 Content objects to preserve thought signatures. The router passes a
 `tool_executor` callback that Gemini calls internally.
@@ -174,7 +174,7 @@ TOOL_REGISTRY: dict[str, ToolDef]  # name -> ToolDef(name, description, paramete
 |----------|---------|
 | `get_tool_schemas_for_llm()` | Returns OpenAI-format tool definitions for the LLM |
 | `execute_tool(name, args)` | Runs a tool and ensures JSON-serializable output |
-| `get_artifact_type(name)` | Maps tool name to frontend artifact type |
+| `ToolBackend.catalog_for(...)` | Tool contracts, each carrying its frontend artifact type |
 | `init_tool_state(...)` | Bridges FastAPI app state to MCP module globals |
 
 **Tool to artifact type mapping (7 tools):**
@@ -193,19 +193,19 @@ TOOL_REGISTRY: dict[str, ToolDef]  # name -> ToolDef(name, description, paramete
 
 ## 5. Provider Configuration
 
-Defined in `packages/server/src/repowise/server/provider_config.py`.
+Defined in `packages/server/src/repowise/server/provider_config.py`, on top of
+the resolver every entry point shares (`core/providers/llm/resolve.py`).
 
-API keys and active provider/model selection are stored in a server-side
-`provider_config.json` file. Environment variables take precedence over stored
-keys.
+**Provider, model and base URL** (first match wins):
+1. A per-request override from the chat model picker
+2. The repo's `.repowise/config.yaml` (`PATCH /api/providers/active` with `repo_id` writes here)
+3. The global default in `provider_config.json` (`PATCH` without `repo_id`)
+4. `REPOWISE_PROVIDER` / `REPOWISE_MODEL` and the provider's `*_BASE_URL`
+5. The provider's default model, or auto-detection from the keys present
 
-**Resolution order for API keys:**
-1. Environment variable (e.g. `GEMINI_API_KEY`, `ANTHROPIC_API_KEY`)
-2. Stored key in `provider_config.json`
-
-**Active provider resolution:**
-1. Explicitly set via `PATCH /api/providers/active`
-2. Auto-detect from first configured provider
+**API keys:** environment variable, then the repo's `.repowise/.env`, then the
+key stored in `provider_config.json`. `GET /api/providers` reports the resolved
+values with the layer each came from (`active.provenance`).
 
 **Provider catalog:** Gemini, Anthropic, OpenAI, Ollama (local, no key), LiteLLM.
 
@@ -272,6 +272,17 @@ for each iteration:
 
 After the loop, the assistant message (text + all tool calls with results) is
 saved to the database and a `done` event is emitted.
+
+**Charts in chat:** the model calls an analysis tool, then the chat-only
+`show_view` tool, which the server turns into a table or chart from that
+result. Every result the model sees starts with its `artifact_id`, and
+`show_view` takes any id from the conversation or `latest:<tool_name>` for
+that tool's newest result. A chart whose values are all zero is not drawn.
+When no named view fits, the `chart` view takes a small spec (rows, x, y,
+series, filter, aggregate, sort, top with an Other bucket, kind) and the server
+filters, groups and draws it, picking the chart type from the data's shape
+unless one is asked for. The same guards apply: no person fields, no risk score
+as a plotted value, and attribution figures only through `changes.provenance`.
 
 ---
 

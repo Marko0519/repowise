@@ -9,6 +9,7 @@ rendering (:mod:`.reporting`).
 
 from __future__ import annotations
 
+import contextlib
 import sys
 import time
 from collections.abc import Callable
@@ -42,6 +43,7 @@ from repowise.cli.helpers import (
 )
 from repowise.core.docs_mode import docs_mode_state_fields, resolve_docs_mode
 from repowise.core.ingestion.git_indexer import (
+    GIT_HISTORY_BACKFILL_REWALK,
     GIT_HISTORY_VERSION,
     GIT_HISTORY_VERSION_KEY,
     git_history_stale,
@@ -1092,6 +1094,12 @@ def run_update(
     # it must not wait on a re-score (7-day decay) or cost an indexing run.
     if not dry_run:
         _repair_module_attribution(repo_path)
+        # Opt-in edit capture: bind pending agent edits to the new commits
+        # before the git walk labels them. A no-op unless capture is on.
+        with contextlib.suppress(Exception):
+            from repowise.core.edit_capture.binder import bind_repo
+
+            bind_repo(Path(repo_path))
 
     analyzer_changed = health_analyzer_changed(state)
     # Stored per-file git rows written under older history rules. Only a full
@@ -1128,7 +1136,10 @@ def run_update(
         )
     if history_stale:
         console.print(
-            "[yellow]Git history rules changed since this index was built; "
+            "[yellow]Re-reading git history once to label commits from the "
+            "attribution backfill.[/yellow]"
+            if state.get(GIT_HISTORY_VERSION_KEY) == GIT_HISTORY_BACKFILL_REWALK
+            else "[yellow]Git history rules changed since this index was built; "
             "re-reading the full history once.[/yellow]"
         )
     # Deliberately not in ``git_is_current``: the rescan does its own full parse,
@@ -1233,9 +1244,11 @@ def run_update(
         # where an orientation page registered after the index was built is
         # most likely to go unmentioned forever: it returns before the
         # generation code, so nothing else in the run can notice.
+        from .commit_limit_notice import surface_pinned_commit_limit
         from .slot_notice import surface_missing_slots
 
         surface_missing_slots(repo_path, emitter=emitter, dry_run=dry_run)
+        surface_pinned_commit_limit(repo_path, emitter=emitter, dry_run=dry_run)
         if emitter is not None:
             emitter.done(
                 ok=True,
@@ -1361,9 +1374,11 @@ def run_update(
     # An orientation page registered after this index was built cannot arrive
     # below, because this run's parsed_files is the changed-file slice, so name
     # the command that does reach it. Says nothing when there is nothing to say.
+    from .commit_limit_notice import surface_pinned_commit_limit
     from .slot_notice import surface_missing_slots
 
     surface_missing_slots(repo_path, emitter=emitter, dry_run=dry_run)
+    surface_pinned_commit_limit(repo_path, emitter=emitter, dry_run=dry_run)
 
     render_header(repo_path, base_ref, head)
 

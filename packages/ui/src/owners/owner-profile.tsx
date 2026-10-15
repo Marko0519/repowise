@@ -138,28 +138,18 @@ export function OwnerProfileView({
       href: `${base}/owners`,
     });
   }
-  if (owner.agent_collab && owner.agent_collab.agent_commit_count > 0) {
-    const a = owner.agent_collab;
-    reads.push({
-      key: "agent",
-      label: "Agent-assisted",
-      value: a.agent_commit_count.toLocaleString(),
-      unit: "commits",
-      why:
-        (a.agent_share_pct != null
-          ? `${a.agent_share_pct.toFixed(2)}% of the commits on their owned files carry a coding-agent trailer. `
-          : "Read from commit trailers, so it counts what was declared. ") +
-        `${a.files_with_agent_commits.toLocaleString()} owned ${a.files_with_agent_commits === 1 ? "file has" : "files have"} one.`,
-      href: `${base}/commits`,
-    });
-  }
-
   // Volume figures, none of which appear in the lede, the reads column or a
   // section below. The two line counts are the payload's `_est` fields, so an
   // exact six-digit figure would claim a precision the number does not have.
   const ribbon: RibbonStat[] = [
     // Null when the indexed commits do not reach back 90 days: not a zero.
-    { label: "Commits, 90d", value: owner.commit_count_90d?.toLocaleString() ?? "—" },
+    {
+      label: "Commits, 90d",
+      // A floor when the indexed commits stop inside the window.
+      value:
+        owner.commit_count_90d?.toLocaleString() ??
+        (owner.commit_count_90d_at_least ? `≥${owner.commit_count_90d_at_least.toLocaleString()}` : "—"),
+    },
     {
       label: "Lines added",
       value: formatCompact(owner.lines_added_90d_est),

@@ -399,7 +399,11 @@ priority order:
    `dist` and `target` are pruned only when the directory itself holds no
    hand-written source file (JavaScript, C/C++ and data formats do not count,
    since builds emit them), so a source package with one of those names is
-   indexed and a committed bundle is not
+   indexed and a committed bundle is not. Any directory that would be pruned
+   by the blocklist can be re-included by an explicit `!pattern` in root or
+   per-directory `.repowiseIgnore` or `exclude_patterns` (e.g. `!src/build/`).
+   Only explicitly named directories are re-included; sub-directories in the
+   blocklist (such as a nested `node_modules`) stay pruned unless also named.
 6. Auto-detection of generated files (files with `// Code generated` headers)
 7. Binary files (detected by null bytes in first 8KB)
 8. Files over `max_file_size_kb` (default: 500KB)
@@ -1620,17 +1624,14 @@ Full configuration with defaults (`.repowise/config.yaml`):
 ```yaml
 provider: anthropic          # anthropic | openai | openrouter | gemini | deepseek | kimi | ollama | litellm | codex_cli | opencode | edenai | mock
 model: claude-sonnet-4-5    # passed through to the provider
-embedding_provider: anthropic
-embedding_model: voyage-3
+embedder: gemini             # gemini | openai | openrouter | ollama | edenai | mock
+embedding_model: gemini-embedding-001
 
 prompt_caching: true
 
-anthropic:
-  api_key: ${ANTHROPIC_API_KEY}
-
+# API keys are read from the environment or .repowise/.env, never from here.
 openai:
-  api_key: ${OPENAI_API_KEY}
-  base_url: https://api.openai.com/v1
+  base_url: https://api.openai.com/v1   # any OpenAI-compatible endpoint
 
 ollama:
   base_url: http://localhost:11434

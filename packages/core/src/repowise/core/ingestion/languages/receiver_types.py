@@ -370,6 +370,9 @@ IMPLICIT_FIELD_LANGUAGES = frozenset({"csharp", "dart", "java", "kotlin", "swift
 # Only where nothing in the repo can add a method to a builtin type: C#
 # extension methods, Kotlin and Swift extensions and Rust trait impls all can.
 EXTERNAL_TYPE_LANGUAGES = frozenset({"java"})
+# Those, and Kotlin, whose scan keeps the marked declaration without refusing:
+# a call on it may still reach a repo extension of the builtin.
+_MARKED_BUILTIN_LANGUAGES = EXTERNAL_TYPE_LANGUAGES | {"kotlin"}
 _EXTERNAL_TYPE = "external:"
 
 # A decorator that changes what the symbol it wraps *is*: `@shared_task` leaves
@@ -1004,7 +1007,7 @@ def scan_declarations(text: str, language: str) -> tuple[Declaration, ...]:
             raw = match.group("type")
             if raw not in resolved:
                 resolved[raw] = _usable_type_name(raw, language)
-                if resolved[raw][0] is None and language in EXTERNAL_TYPE_LANGUAGES:
+                if resolved[raw][0] is None and language in _MARKED_BUILTIN_LANGUAGES:
                     resolved[raw] = (_builtin_type_name(raw, language), False)
             type_name, unwrapped = resolved[raw]
             if type_name is None:
@@ -1068,16 +1071,34 @@ class CallAssignment(NamedTuple):
     awaited: bool = False
 
 
+# The call a local is assigned from: ``[receiver.]target(``. A Kotlin, Swift or
+# Dart local annotated with its type is typed by its declaration instead.
+_CALL_HEAD = r"(?:(?P<receiver>[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\.)?(?P<target>[A-Za-z_]\w*)\s*\("
+
 # ``x = f(..)``, ``x = await obj.f(..)``: a plain statement-start assignment
 # that ends its line. The resolver refuses a name the body also binds elsewhere.
 _PY_CALL_ASSIGNMENT = re.compile(
-    r"(?m)^[ \t]*(?P<name>[a-z_]\w*)[ \t]*=[ \t]*(?P<awaited>await[ \t]+)?"
-    r"(?:(?P<receiver>[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)\.)?(?P<target>[A-Za-z_]\w*)\s*\("
+    rf"(?m)^[ \t]*(?P<name>[a-z_]\w*)[ \t]*=[ \t]*(?P<awaited>await[ \t]+)?{_CALL_HEAD}"
+)
+
+# ``val x = f(..)``, ``let x = try await obj.f(..)``, ``final x = await f(..);``.
+# Swift's ``try?`` value still calls the callee type's methods. A Dart
+# ``await`` unwraps the ``Future`` the callee declares.
+_KT_CALL_ASSIGNMENT = re.compile(rf"(?<![\w.])va[lr]\s+(?P<name>[a-z_]\w*)\s*=\s*{_CALL_HEAD}")
+_SWIFT_CALL_ASSIGNMENT = re.compile(
+    rf"(?<![\w.])(?:let|var)\s+(?P<name>[a-z_]\w*)\s*=\s*(?:try[?!]?\s+)?(?:await\s+)?{_CALL_HEAD}"
+)
+_DART_CALL_ASSIGNMENT = re.compile(
+    rf"(?<![\w.])(?:final|var|const)\s+(?P<name>[a-z_]\w*)\s*=\s*(?P<awaited>await\s+)?"
+    rf"(?:(?:new|const)\s+)?{_CALL_HEAD}"
 )
 
 _CALL_ASSIGNMENT_PATTERNS: dict[str, re.Pattern[str]] = {
+    "dart": _DART_CALL_ASSIGNMENT,
     "go": _GO_CALL_DECL,
+    "kotlin": _KT_CALL_ASSIGNMENT,
     "python": _PY_CALL_ASSIGNMENT,
+    "swift": _SWIFT_CALL_ASSIGNMENT,
 }
 
 # Languages whose locals may be typed from a call's declared return type.
@@ -1086,7 +1107,14 @@ CALL_TYPED_LANGUAGES = frozenset(_CALL_ASSIGNMENT_PATTERNS)
 _QUOTES = frozenset("\"'`")
 _STATEMENT_ENDS = frozenset("\n;}")
 # A Python ``;`` may rebind the name later on the line, where no scan sees it.
-_LANGUAGE_STATEMENT_ENDS = {"python": frozenset("\n")}
+# Dart ends a statement only at ``;``, so ``f()\n.g()`` is one statement.
+_LANGUAGE_STATEMENT_ENDS = {"python": frozenset("\n"), "dart": frozenset(";")}
+# Kotlin and Swift may carry a statement onto a line that starts with a member
+# access or an operator (``.f()``, ``?: x``, ``as T``, ``&& y``). Refused
+# wholesale: a new statement starting so only costs the local its type.
+_NEXT_LINE_CONTINUES = {
+    language: re.compile(r"[.?:+\-*/%&|=!<>]|(?:as|is)\b") for language in ("kotlin", "swift")
+}
 
 
 def _call_end(text: str, index: int) -> int:
@@ -1109,6 +1137,18 @@ def _call_end(text: str, index: int) -> int:
     return -1
 
 
+def _call_ends_statement(cleaned: str, opened: int, language: str) -> bool:
+    """Does the call whose ``(`` ends just before *opened* end its statement?"""
+    end = _call_end(cleaned, opened)
+    if end < 0:
+        return False
+    rest = cleaned[end:].lstrip(" \t\n" if language == "dart" else " \t")
+    if rest and rest[0] not in _LANGUAGE_STATEMENT_ENDS.get(language, _STATEMENT_ENDS):
+        return False
+    continues = _NEXT_LINE_CONTINUES.get(language)
+    return continues is None or not continues.match(rest.lstrip())
+
+
 def scan_call_assignments(text: str, language: str) -> tuple[CallAssignment, ...]:
     """Every local *text* declares from a single call, in line order.
 
@@ -1120,12 +1160,9 @@ def scan_call_assignments(text: str, language: str) -> tuple[CallAssignment, ...
         return ()
     cleaned = _without_comments(text, language)
     starts = [0, *(newline.end() for newline in _NEWLINE.finditer(cleaned))]
-    ends = _LANGUAGE_STATEMENT_ENDS.get(language, _STATEMENT_ENDS)
     found: list[CallAssignment] = []
     for match in pattern.finditer(cleaned):
-        end = _call_end(cleaned, match.end())
-        rest = cleaned[end:].lstrip(" \t") if end >= 0 else ""
-        if end < 0 or (rest and rest[0] not in ends):
+        if not _call_ends_statement(cleaned, match.end(), language):
             continue
         found.append(
             CallAssignment(

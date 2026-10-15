@@ -281,7 +281,9 @@ async def overview_summary(
     # defect-accuracy stat both want every per-file row, and letting each fetch
     # its own pulled the whole table twice per page load.
     health_metrics = await crud.get_health_metrics(session, repo_id)
-    findings = await crud.get_health_findings(session, repo_id)
+    # Every figure here is a KPI the scores counted, so the file-held rows stay
+    # in; ``health.gated`` says what the finding lists leave out.
+    findings = await crud.get_health_findings(session, repo_id, file_holds=False)
     health_summary = await crud.get_health_summary(
         session, repo_id, metrics=health_metrics, findings=findings
     )
@@ -469,14 +471,11 @@ async def overview_summary(
     savings = await _savings_headline(repo.local_path)
     repowise_dir = Path(repo.local_path) / ".repowise" if repo.local_path else Path(".repowise")
 
-    # Serve the same read-time self-healed "indexed commit" as /api/repos and
-    # /health/overview: prefer state.json's last_sync_commit over a possibly
-    # stale DB row so the dashboard's indexed-commit display (and any freshness
-    # signal derived from it) doesn't read "behind" after a no-op update left
-    # the repositories row un-restamped.
+    # The same indexed commit as /api/repos and /health/overview: state.json
+    # and the row reconciled, the row's own value when the two diverge.
     from repowise.server.mcp_server._meta import resolve_indexed_commit
 
-    indexed_commit = resolve_indexed_commit(repo.head_commit, repo.local_path)
+    indexed_commit = resolve_indexed_commit(repo.head_commit, repo.local_path) or repo.head_commit
 
     return {
         "repo": {
@@ -525,6 +524,8 @@ async def overview_summary(
             # The findings' count vocabulary, which the Code Health page and the
             # agent surfaces report too; ``open_findings`` stays for older readers.
             "finding_counts": (await unit_counts(session, repo_id, "findings")).as_dict(),
+            # Why the finding lists hold some of those back, by language or file hold.
+            "gated": await crud.gated_health_counts(session, repo_id),
             # The two co-equal pillars surfaced alongside the defect headline.
             "maintainability_average": health_summary.get("maintainability_average"),
             "performance_average": health_summary.get("performance_average"),

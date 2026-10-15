@@ -13,7 +13,7 @@ from collections import Counter
 from time import perf_counter
 from typing import Any
 
-from repowise.core.analysis.finding_registry import withheld_summary
+from repowise.core.analysis.finding_registry import FILE_HOLDS, withheld_summary
 from repowise.core.analysis.health.counts import DEFAULT_COUNTS
 from repowise.core.analysis.health.refactoring.serving import (
     DEFAULT_VIEW as _REFACTORING_VIEW_DEFAULT,
@@ -30,6 +30,13 @@ from repowise.server.mcp_server._helpers import (
     _unsupported_repo_all,
 )
 from repowise.server.mcp_server._meta import build_meta as _build_meta
+from repowise.server.mcp_server._workspace_routing import (
+    hint_misses,
+    needs_routing,
+    one_repo_refusal,
+    route_targets,
+    single_repo,
+)
 from repowise.server.mcp_server.tool_health.analysis_meta import (
     _attach_health_analysis_meta,
     _attach_repository_analysis_meta,
@@ -185,6 +192,13 @@ async def get_health(
     )
     if conflict is not None:
         return _note_inapplicable_controls(conflict, scope, counts)
+    routes = await route_targets(targets, paths_only=True) if repo is None and targets else None
+    routed_repo = None
+    if needs_routing(routes):
+        routed_repo = single_repo(routes)
+        if routed_repo is None:
+            return {**one_repo_refusal("get_health", routes), "_meta": _build_meta()}
+        targets, repo = [r.local for r in routes], routed_repo
     req = HealthRequest(
         targets=targets,
         include=include,
@@ -260,14 +274,29 @@ async def get_health(
         _attach_semantics(result, req)
         # Server-side wall clock, as ``get_context`` reports.
         result["_meta"]["timing_ms"] = round((perf_counter() - started) * 1000, 2)
+        if routed_repo is not None:
+            if any(r.routed for r in routes):
+                result["repo"] = routed_repo
+            hint_misses(result, routes)
         return result
 
 
 def _attach_gated(meta: dict[str, Any], data: HealthData) -> None:
-    """What a language gate held back, in ``_meta`` so no ``only`` projection
-    drops it: an agent must read "held back", never "nothing found"."""
-    if data.gated:
-        meta["gated"] = {**data.gated, "opt_in": {"include": ["unverified"]}}
+    """What a language gate or file hold held back, in ``_meta`` so no ``only``
+    projection drops it: an agent must read "held back", never "nothing found"."""
+    if not data.gated:
+        return
+    # A file hold is a count per key: its reason is one fixed sentence, sent
+    # once under ``reasons`` and only when the call lists no finding, so a
+    # default response grows by a few tokens at most.
+    gated: dict[str, Any] = {
+        layer: {k: v["count"] if k in FILE_HOLDS else v for k, v in cells.items()}
+        for layer, cells in data.gated.items()
+    }
+    held = sorted({k for cells in data.gated.values() for k in cells if k in FILE_HOLDS})
+    if held and not data.findings.emitted:
+        gated["reasons"] = {k: FILE_HOLDS[k] for k in held}
+    meta["gated"] = {**gated, "opt_in": {"include": ["unverified"]}}
 
 
 def _attach_withheld(result: dict[str, Any], data: HealthData) -> None:

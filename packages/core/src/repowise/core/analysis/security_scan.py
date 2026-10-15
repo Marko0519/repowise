@@ -23,12 +23,13 @@ import logging
 import re
 from collections.abc import Callable, Iterable, Mapping
 from datetime import UTC, datetime
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from repowise.core.analysis.secret_allowlist import secret_path_allowlist
 from repowise.core.code_origin import code_origin
 from repowise.core.support_paths import DOC_EXTENSIONS
 from repowise.core.test_paths import is_test_related_path
@@ -999,12 +1000,14 @@ def mask_comments_and_strings(
     strings: bool = True,
     nested_comments: bool = False,
     raw_backticks: bool = False,
+    hash_comments: bool = True,
 ) -> str:
     """Blank common comments (and strings, unless *strings* is false), keeping offsets.
 
     Strings are still tracked when they are kept, so a ``#`` or ``//`` inside
     one does not open a comment. Newlines are never blanked. *nested_comments*
-    and *raw_backticks* come from :func:`mask_dialect`.
+    and *raw_backticks* come from :func:`mask_dialect`; *hash_comments* false
+    keeps a ``#`` line, which is code in C, Rust, C# or Swift (``#include``).
     """
     out: list[str] = []
     copied = 0
@@ -1067,7 +1070,7 @@ def mask_comments_and_strings(
             i += 1
             if template_depth == 0:
                 state = "template"
-        elif char == "#" or source.startswith("//", i):
+        elif (hash_comments and char == "#") or source.startswith("//", i):
             width = 1 if char == "#" else 2
             blank(i, i + width)
             i += width
@@ -1423,18 +1426,34 @@ def scan_source(file_path: str, source: str, symbols: Iterable[Any] = ()) -> lis
     return [f for f in findings if f["kind"] not in SECRET_KINDS or f["line"] not in allowed]
 
 
+def _repo_root(file_info: Any) -> str | None:
+    """The directory *file_info*'s repo-relative path is taken from, or ``None``."""
+    rel = PurePosixPath(file_info.path)
+    absolute = Path(getattr(file_info, "abs_path", "") or "")
+    if not (rel.parts and absolute.is_absolute()):
+        return None
+    if absolute.parts[-len(rel.parts) :] != rel.parts:
+        return None
+    return str(absolute.parents[len(rel.parts) - 1])
+
+
 def scan_source_map(
     parsed_files: Iterable[Any],
     source_map: Mapping[str, bytes | str],
 ) -> tuple[dict[str, list[dict]], list[str]]:
     """Return ``(findings_by_file, scanned_paths)`` for ``replace_findings``.
 
-    A path missing from *source_map* still gets the symbol-name scan.
+    A path missing from *source_map* still gets the symbol-name scan. Secret
+    findings drop in a path the repository's own secret-scanner config
+    allowlists; the root it is read from is the one the parsed files sit under.
     """
     findings_by_file: dict[str, list[dict]] = {}
     scanned_paths: list[str] = []
+    allowlisted: Callable[[str], bool] | None = None
     for pf in parsed_files:
         path = pf.file_info.path
+        if allowlisted is None:
+            allowlisted = secret_path_allowlist(_repo_root(pf.file_info))
         raw = source_map.get(path, b"")
         if isinstance(raw, (bytes, bytearray)):
             source_text = raw.decode("utf-8", errors="replace")
@@ -1442,6 +1461,8 @@ def scan_source_map(
             source_text = raw or ""
         scanned_paths.append(path)
         findings = scan_source(path, source_text, pf.symbols)
+        if findings and allowlisted(path):
+            findings = [f for f in findings if f["kind"] not in SECRET_KINDS]
         if findings and IGNORE_TOKEN in source_text:
             # The gate keeps a silenced finding to report it as suppressed; the
             # stored scan is what the dashboard and agents read, so it drops it.
