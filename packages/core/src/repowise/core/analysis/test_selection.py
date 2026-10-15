@@ -42,7 +42,8 @@ tests that import it, directly or through other helpers (basis
 ``helper-importers``), which are the files that run it: Python runs the
 package file for each module in it, and pytest loads a conftest for each test
 at or below it. Only documentation (``docs/`` and the root README, CHANGELOG,
-LICENSE and the like, never code) that no code names is skipped without a test.
+LICENSE and the like, never code), and Markdown, reST or AsciiDoc no package
+holds and no code sits beside, that no code names is skipped without a test.
 
 A file whose reach is known runs a scope (:mod:`.selection_scopes`) in place of
 everything: a manifest or lockfile its ecosystem's tests, a production
@@ -274,7 +275,9 @@ class Selection:
     nothing was asked (no index), or a scope's ``ecosystem``,
     ``package-importers``, ``named-by`` or ``owner-package``. ``why`` says, per
     selected test file, what put it in: the changed file and evidence that
-    reached it, or the reason it runs with every subset.
+    reached it, or the reason it runs with every subset. ``known_tests`` are
+    the checkout's runnable test files (empty when not read), so a selection
+    can say how much of the suite it is.
     """
 
     run_all: bool
@@ -286,6 +289,7 @@ class Selection:
     skipped_files: tuple[str, ...] = ()
     basis: Mapping[str, str] = field(default_factory=dict)
     why: Mapping[str, str] = field(default_factory=dict)
+    known_tests: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -379,12 +383,20 @@ def _named_in(
     """The files of *by_name* that *path*'s *text* names (see :func:`file_namers`).
 
     The text is scanned once per name held, whatever the number of files of
-    that name.
+    that name. A mention in a comment or docstring names nothing: a widely
+    imported module citing a doc there would read as its reader and select
+    every test reaching it. Ceiling: a path read only through a docstring
+    (a doctest) is missed.
     """
+    from .fixture_readers import code_text
     from .namer_paths import any_may_mean, mentions
 
-    out: list[str] = []
     folded = text.lower()
+    if not any(name.lower() in folded for name in by_name):
+        return []  # most sources hold no name: skip the comment strip
+    text = code_text(path, text)
+    folded = text.lower()
+    out: list[str] = []
     for name, same in by_name.items():
         if name.lower() not in folded:
             continue
@@ -411,6 +423,7 @@ def plugin_loader(sources: Iterable[tuple[str, str]]) -> str | None:
     return None
 
 
+NO_TESTS_NEEDED = "no-tests-needed"
 PACKAGE_INIT_REASON = "every import of the package runs it, and those are not all tracked"
 
 
@@ -550,8 +563,11 @@ def select_tests(inp: SelectionInput) -> Selection:
     """Decide what a change must run (see the module docstring for the rules)."""
     deleted = set(inp.deleted)
     paths = sorted(set(inp.changed) | deleted)
-    scoped = [p for p in paths if p in inp.scopes]
+    unneeded = [p for p in paths if p in inp.scopes and inp.scopes[p].needs_no_tests]
+    scoped = [p for p in paths if p in inp.scopes and p not in unneeded]
     triage = _triage([p for p in paths if p not in inp.scopes], inp.config, inp.doc_readers)
+    triage.skipped = sorted([*triage.skipped, *unneeded])
+    triage.basis.update(dict.fromkeys(unneeded, NO_TESTS_NEEDED))
     run_all = [*_empty_change_reasons(paths, inp.label), *triage.run_all]
     walks = bool(triage.code) or any(inp.scopes[p].routes for p in scoped)
     run_all += _index_reasons(inp, has_code=walks)
@@ -592,6 +608,7 @@ def select_tests(inp: SelectionInput) -> Selection:
         skipped_files=tuple(triage.skipped),
         basis=basis,
         why={**scope_why, **gap_why, **_why(triage.code, per_file, evidence), **always},
+        known_tests=tuple(inp.known_tests),
     )
 
 
@@ -682,7 +699,7 @@ def _triage(
             out.basis[path] = "full-run"
         elif is_documentation(path):
             out.skipped.append(path)
-            out.basis[path] = "no-tests-needed"
+            out.basis[path] = NO_TESTS_NEEDED
         elif is_test_related_path(path) and not is_code_file(path):
             out.run_all.append(
                 f"{path} is in a test tree but is not code (data, a snapshot or a "

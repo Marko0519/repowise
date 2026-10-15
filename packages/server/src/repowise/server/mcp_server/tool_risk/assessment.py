@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import math
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -15,7 +16,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from repowise.core.analysis.pr_blast import untested_files
 from repowise.core.analysis.security_scan import SYMBOL_NAME_KINDS
 from repowise.core.co_change import confidence_ratio, parse_partners
-from repowise.core.git_refs import find_path_removal
 from repowise.core.persistence.models import (
     GitMetadata,
     Repository,
@@ -26,7 +26,7 @@ from repowise.server.mcp_server._helpers import (
     is_excluded,
 )
 from repowise.server.mcp_server._meta import served_root
-from repowise.server.repo_paths import normalize_target_path
+from repowise.server.repo_paths import missing_path_hint, normalize_target_path
 
 #: A file carrying this many counted bug fixes reads as bug-prone. Same trigger
 #: the PR bot uses for prior defects, so the two surfaces agree on "a lot".
@@ -350,6 +350,23 @@ def _fix_clause(profile: dict | None) -> str:
     )
 
 
+def _churn_clause(churn_percentile: float, is_hotspot: bool, trend: str) -> str:
+    """Churn clause for ``risk_summary``, or empty when the file is not a hotspot.
+
+    ``churn_percentile`` is a rank (0 to 1), not a risk. Printed as a bare
+    percentage it read like "100% risk", and it was printed for files below the
+    hotspot cut too. So the clause states the rank as a rank ("top N%") and only
+    for files the stored ``is_hotspot`` flag marks; ``trend`` stays available as
+    its own field either way. Trailing separator included, as in ``_fix_clause``.
+    """
+    if not is_hotspot:
+        return ""
+    # Round before the ceiling: 1 - 0.86 is 0.14000000000000001 in floats, and
+    # that would otherwise print as top 15%.
+    top_pct = max(1, math.ceil(round((1.0 - churn_percentile) * 100, 6)))
+    return f"churn hotspot, top {top_pct}% ({trend}), "
+
+
 def _defect_profile(meta: Any, now: datetime | None = None) -> dict | None:
     """What this file's counted bug fixes say about it, or ``None`` for silence.
 
@@ -417,9 +434,9 @@ async def _unresolved_reason(
     name", and it resolves a directory to ``not_indexed`` — both would
     prescribe a fix that cannot help here.
 
-    ``no_such_path`` also carries ``moved_to``/``removed_by_commit`` when git
-    can explain the miss as a rename or a same-named-directory split (#2633),
-    found off the thread so the blocking git call does not stall the loop.
+    ``no_such_path`` also carries what :func:`missing_path_hint` finds (a
+    rename, or another branch holding the path), off the thread so the
+    blocking git calls do not stall the loop.
     """
     if target.startswith("module:"):
         return {"unresolved_reason": "unsupported_target_kind"}
@@ -431,16 +448,48 @@ async def _unresolved_reason(
             return {"unresolved_reason": "not_indexed"}
     except (OSError, ValueError):
         pass
-    removal = None
-    if repo_root:
-        with contextlib.suppress(OSError, ValueError):
-            removal = await asyncio.to_thread(find_path_removal, repo_root, lookup_path)
-    if removal is None:
-        return {"unresolved_reason": "no_such_path"}
+    hint = await asyncio.to_thread(missing_path_hint, repo_root, lookup_path)
+    return {"unresolved_reason": "no_such_path", **hint}
+
+
+def _history_tier_card(target: str, meta: Any, security_signals: list[dict]) -> dict:
+    """The card for a file indexed at the history tier (``meta.history_only``).
+
+    A non-code file keeps commit counts, windows and authorship, but no churn
+    percentile, hotspot flag, co-change partners or fix rollup, so the scored
+    card would print zeros nothing measured. This one carries only what was.
+    """
+    commits = meta.commit_count_total or 0
+    last = meta.last_commit_at.isoformat() if meta.last_commit_at else None
+    owner = meta.primary_owner_name or "unknown"
+    pct = meta.primary_owner_commit_pct or 0.0
     return {
-        "unresolved_reason": "no_such_path",
-        "removed_by_commit": removal.commit,
-        "moved_to": removal.moved_to,
+        "target": target,
+        "signal_tier": "history",
+        "signal_tier_reason": (
+            "not a parsed code file: only commit history is indexed, so hotspot, "
+            "co-change and risk classification do not apply"
+        ),
+        "commit_count_total": commits,
+        "commit_count_90d": meta.commit_count_90d or 0,
+        "last_commit_at": last,
+        "trend": _compute_trend(meta),
+        "primary_owner": owner,
+        "owner_pct": pct,
+        "contributor_count": meta.contributor_count or 0,
+        "security_signals": security_signals,
+        # Workspace enrichment adds its rows here; co-change covers code files only.
+        "relationship_analysis": {
+            "co_change": {
+                "status": "unavailable",
+                "scope": "git_history",
+                "reason": "history-tier file",
+            }
+        },
+        "risk_summary": (
+            f"{target}: history only, {commits} commits, last {last[:10] if last else 'unknown'}, "
+            f"{_owner_clause(owner, pct, None)}"
+        ),
     }
 
 
@@ -598,6 +647,10 @@ async def _assess_one_target(
             ),
         }
 
+    if getattr(meta, "history_only", False) is True:
+        security = await _get_security_signals(session, repo_id, lookup_path)
+        return _history_tier_card(target, meta, security)
+
     if meta is None:
         result_data["hotspot_score"] = 0.0
         result_data["is_hotspot"] = False
@@ -710,10 +763,10 @@ async def _assess_one_target(
     # on a churn percentile even where risk_type said "bug-prone", so the first
     # thing an agent read disagreed with the classification beside it. Counted
     # fixes are the better grounded defect signal, so they go first and churn
-    # keeps its place as the next clause.
+    # keeps its place as the next clause, for files that are churn hotspots.
     result_data["risk_summary"] = (
         f"{target} — {_fix_clause(defect_profile)}"
-        f"hotspot score {hotspot_score:.0%} ({trend}), "
+        f"{_churn_clause(hotspot_score, result_data['is_hotspot'], trend)}"
         f"{dep_count} direct dependents, {risk_type}, {change_pattern}, "
         f"{co_changes_total} co-change partners, {_owner_clause(owner, pct, line_pct)}"
         f"{bus_note}{capped_note}"

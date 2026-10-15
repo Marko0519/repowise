@@ -21,6 +21,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from repowise.core.analysis.communities import has_community
 from repowise.core.analysis.decisions.lifecycle import is_governing
 from repowise.core.analysis.decisions.scope import binds_to_paths
+from repowise.core.attribution import attribution_enabled, file_share
 from repowise.core.generation.page_selection import STALE_STATUSES
 from repowise.core.ingestion.models import (
     NON_DEPENDENCY_EDGE_TYPES,
@@ -45,6 +46,7 @@ from repowise.core.persistence.models import (
 )
 from repowise.server.mcp_server._basis import call_resolution_basis, same_file_basis
 from repowise.server.mcp_server._budget import OmissionCollector, cap_collection
+from repowise.server.mcp_server._changes import file_changes, file_provenance, load_file_meta
 from repowise.server.mcp_server._edit_sites import reference_edit_set
 from repowise.server.mcp_server._helpers import (
     LIKE_ESCAPE,
@@ -1164,10 +1166,17 @@ async def _resolve_one_target(
                 if recent and recent != meta.primary_owner_name:
                     ownership["recent_owner"] = recent
                     ownership["recent_owner_pct"] = getattr(meta, "recent_owner_commit_pct", None)
-                # Agent provenance — only surfaced when agent-attributed
-                # commits exist, so human-only files stay noise-free.
-                if getattr(meta, "agent_commit_count", 0):
-                    ownership["agent_authored_pct"] = getattr(meta, "agent_authored_pct", None)
+                # Agent provenance, only when agent-attributed commits exist
+                # and attribution is on. The share is of commits with a known
+                # source, with its coverage; unknown is never human.
+                if getattr(meta, "agent_commit_count", 0) and attribution_enabled(
+                    repository.local_path
+                ):
+                    ownership["agent_share"] = file_share(
+                        meta.agent_commit_count,
+                        getattr(meta, "attribution_known_count", 0),
+                        meta.commit_count_total,
+                    ).summary()
                     ownership["agent_commit_count"] = meta.agent_commit_count
                     with contextlib.suppress(TypeError, ValueError):
                         ownership["agent_tier_counts"] = json.loads(
@@ -1216,6 +1225,21 @@ async def _resolve_one_target(
             last_change["author"] = None
             last_change["days_ago"] = None
         result_data["last_change"] = last_change
+
+    # --- Change Records and provenance (file targets, opt-in) ---
+    if include and target_type == "file" and file_path_for_git and include & {
+        "changes",
+        "provenance",
+    }:
+        attribution = attribution_enabled(repository.local_path)
+        if "changes" in include:
+            found = await file_changes(
+                session, repository, [file_path_for_git], attribution=attribution
+            )
+            result_data.update(found[file_path_for_git])
+        if "provenance" in include:
+            meta = await load_file_meta(session, repo_id, file_path_for_git) if attribution else None
+            result_data["provenance"] = file_provenance(meta, attribution)
 
     # --- Decisions ---
     if include is None or "decisions" in include:

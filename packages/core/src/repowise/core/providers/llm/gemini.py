@@ -37,6 +37,7 @@ from repowise.core.providers.llm.base import (
     provider_should_retry,
     record_generation_cost,
 )
+from repowise.core.providers.llm.specs import PROVIDER_SPECS
 from repowise.core.rate_limiter import RateLimiter
 from repowise.core.reasoning import ReasoningMode, normalize_reasoning
 
@@ -227,7 +228,7 @@ class GeminiProvider(BaseProvider):
     """Native Gemini provider using the google-genai SDK.
 
     Args:
-        model:        Gemini model name. Defaults to gemini-3.5-flash-lite.
+        model:        Gemini model name. Defaults to the spec's default_model.
         api_key:      Google API key. Falls back to GEMINI_API_KEY or GOOGLE_API_KEY env var.
         base_url:     Optional custom base URL (e.g., for proxy/self-hosted endpoints).
         rate_limiter: Optional RateLimiter instance.
@@ -236,7 +237,7 @@ class GeminiProvider(BaseProvider):
 
     def __init__(
         self,
-        model: str = "gemini-3.5-flash-lite",
+        model: str = PROVIDER_SPECS["gemini"].default_model,
         api_key: str | None = None,
         base_url: str | None = None,
         rate_limiter: RateLimiter | None = None,
@@ -504,6 +505,7 @@ class GeminiProvider(BaseProvider):
         contents = _to_gemini_contents(messages)
 
         max_loops = 10
+        usage = _UsageTotal()
         for _ in range(max_loops):
             # Call Gemini
             try:
@@ -512,10 +514,11 @@ class GeminiProvider(BaseProvider):
                 raise
             except Exception as exc:
                 raise ProviderError("gemini", f"{type(exc).__name__}: {exc}") from exc
+            usage.add(getattr(response, "usage_metadata", None))
 
             if not response.candidates:
                 yield ChatStreamEvent(type="stop", stop_reason="end_turn")
-                return
+                break
 
             # The model's response content — preserved as-is for the next turn
             model_content = response.candidates[0].content
@@ -526,14 +529,14 @@ class GeminiProvider(BaseProvider):
 
             if not function_calls_found:
                 yield ChatStreamEvent(type="stop", stop_reason="end_turn")
-                return
+                break
 
             # If no tool_executor, yield stop and let the caller handle
             # (will break on next round-trip due to thought_signature, but
             # this is a fallback)
             if tool_executor is None:
                 yield ChatStreamEvent(type="stop", stop_reason="tool_use")
-                return
+                break
 
             # Execute tools and build function_response parts
             # Append the model's response (with thought signatures) to contents
@@ -557,9 +560,30 @@ class GeminiProvider(BaseProvider):
             # Append tool results as a user turn
             contents.append(genai_types.Content(role="user", parts=response_parts))
             # Loop back to get the model's text response
+        else:
+            # Max loops reached
+            yield ChatStreamEvent(type="stop", stop_reason="end_turn")
+        if usage.reported:
+            yield ChatStreamEvent(
+                type="usage", input_tokens=usage.input_tokens, output_tokens=usage.output_tokens
+            )
 
-        # Max loops reached
-        yield ChatStreamEvent(type="stop", stop_reason="end_turn")
+
+class _UsageTotal:
+    """Token counts summed over the internal tool loop's calls."""
+
+    def __init__(self) -> None:
+        self.input_tokens = 0
+        self.output_tokens = 0
+        self.reported = False
+
+    def add(self, metadata: Any) -> None:
+        prompt = getattr(metadata, "prompt_token_count", None)
+        output = getattr(metadata, "candidates_token_count", None)
+        if isinstance(prompt, int):
+            self.input_tokens += prompt
+            self.output_tokens += output if isinstance(output, int) else 0
+            self.reported = True
 
 
 def _strip_unsupported_schema_keys(schema: Any) -> Any:

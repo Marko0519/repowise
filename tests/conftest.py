@@ -111,6 +111,39 @@ def _isolate_db_url_env():
 
 
 @pytest.fixture(autouse=True)
+def _isolate_tokens_file(monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory):
+    """Keep a developer's ``~/.repowise/tokens.yaml`` from turning server auth on."""
+    missing = tmp_path_factory.getbasetemp() / "no-tokens.yaml"
+    monkeypatch.setenv("REPOWISE_TOKENS_FILE", str(missing))
+
+
+_REAL_HOME = Path.home()
+
+
+@pytest.fixture(autouse=True)
+def _isolate_provider_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path_factory: pytest.TempPathFactory
+):
+    """Keep a developer's ``~/.repowise`` provider and embedder settings out.
+
+    Every LLM resolver reads ``provider_config.json`` (global default, stored
+    keys) and the embedder resolver reads ``~/.repowise/config.yaml``, so real
+    ones on the machine would decide what a test resolves. A test that moves
+    ``Path.home`` on purpose still gets its own home.
+    """
+    scratch = tmp_path_factory.mktemp("provider-config")
+    monkeypatch.setenv("REPOWISE_CONFIG_DIR", str(scratch))
+    from repowise.core.providers.embedding import resolve as embedding_resolve
+
+    def _global_embedder_config() -> Path:
+        home = Path.home()
+        return (scratch if home == _REAL_HOME else home / ".repowise") / "config.yaml"
+
+    monkeypatch.setattr(embedding_resolve, "global_config_path", _global_embedder_config)
+    sys.modules["repowise.core.providers.llm.resolve"].clear_cache()
+
+
+@pytest.fixture(autouse=True)
 def _fresh_per_index_caches():
     """Drop the MCP server's per-index caches before every test.
 
@@ -118,7 +151,7 @@ def _fresh_per_index_caches():
     so every test's index looks the same to the cache key. Looked up in
     ``sys.modules`` so a test that never loads the server pays nothing.
     """
-    for name in ("_basis", "_scope", "_graph_files", "tool_overview.graph"):
+    for name in ("_basis", "_scope", "_graph_files", "tool_overview.graph", "_components"):
         module = sys.modules.get(f"repowise.server.mcp_server.{name}")
         if module is not None:
             module.reset_cache()

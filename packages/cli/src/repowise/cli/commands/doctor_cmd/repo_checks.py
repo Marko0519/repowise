@@ -184,7 +184,7 @@ def _provider_checks(repo_path: _DoctorPath) -> list[DoctorCheck]:
 
     from repowise.cli.helpers import validate_provider_config
 
-    config_warnings = validate_provider_config()
+    config_warnings = validate_provider_config(repo_path=repo_path)
     config_ok = not config_warnings
     config_detail = "No misconfigured provider keys" if config_ok else "; ".join(config_warnings)
     checks.append(_check("Provider config", config_ok, config_detail))
@@ -241,6 +241,54 @@ def _autosync_hook_check(repo_path: _DoctorPath) -> DoctorCheck:
     return _check("Post-commit hook", True, state)
 
 
+def _attribution_notes_check(repo_path: _DoctorPath) -> DoctorCheck | None:
+    """At ``attribution.capture: notes``, whether notes travel with the repo.
+
+    None at every other level. Notes reach teammates only through a fetch
+    refspec and an explicit push, and survive a rebase only via
+    ``notes.rewriteRef``; without them coverage is silently low elsewhere.
+    """
+    name = "Attribution notes"
+    try:
+        from repowise.core.attribution import load_attribution_settings
+
+        if load_attribution_settings(repo_path).capture != "notes":
+            return None
+        from repowise.core.edit_capture.notes import FETCH_REFSPEC, NOTES_REF, refspec_status
+
+        status = refspec_status(_DoctorPath(repo_path))
+    except OSError as exc:
+        return _check(name, True, f"could not read git config ({exc})")
+    if not status["remote"]:
+        return _check(name, True, "no origin remote, so notes stay on this machine")
+    push = (
+        "push refspec set"
+        if status["push"]
+        else f"share them with 'git push origin {NOTES_REF}'"
+    )
+    problems = []
+    if not status["fetch"]:
+        problems.append(f"run 'git config --add remote.origin.fetch \"{FETCH_REFSPEC}\"'")
+    if not status["rewrite_ref"]:
+        problems.append(f"run 'git config --add notes.rewriteRef {NOTES_REF}'")
+    if problems:
+        return _check(name, False, "; ".join([*problems, push]))
+    return _check(name, True, f"fetch refspec and notes.rewriteRef set; {push}")
+
+
+def _events_config_check(repo_path: _DoctorPath) -> DoctorCheck | None:
+    """The ``events:`` block, when it has values that fell back to defaults."""
+    try:
+        from repowise.core.events.store import load_event_settings
+
+        errors = load_event_settings(repo_path).errors
+    except Exception as exc:
+        return _check("Events config", True, f"could not read it ({exc})")
+    if not errors:
+        return None
+    return _check("Events config", False, "; ".join(errors) + " (defaults used)")
+
+
 def _run_repo_checks(
     repo_path: _DoctorPath, repair: bool, *, fmt: str = "table"
 ) -> tuple[bool, list[DoctorCheck]]:
@@ -272,6 +320,12 @@ def _run_repo_checks(
     # 2b. Post-commit auto-sync hook. init installs it by default; not having
     # it is a choice (--no-hook), so its absence is informational, not a fail.
     checks.append(_autosync_hook_check(repo_path))
+    notes_check = _attribution_notes_check(repo_path)
+    if notes_check is not None:
+        checks.append(notes_check)
+    events_check = _events_config_check(repo_path)
+    if events_check is not None:
+        checks.append(events_check)
 
     # 3. Database connectable?
     db_path = repowise_dir / "wiki.db"

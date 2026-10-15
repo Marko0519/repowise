@@ -95,6 +95,8 @@ export interface ActionsResponse {
 export interface ActiveProviderSelection {
   provider?: string | null;
   model?: string | null;
+  base_url?: string | null;
+  provenance?: SelectionProvenance;
   input_cost_per_1k?: number | null;
   output_cost_per_1k?: number | null;
   embedder?: string | null;
@@ -105,21 +107,36 @@ export interface AgentPromptResponse {
   text: string;
 }
 
-/** One month of agent-vs-human commit volume. */
+/** One month of commits by attribution label. */
 export interface AgentTrendBucket {
+  total_commits?: number;
+  agent_commits?: number;
+  human_attested_commits?: number;
+  unknown_commits?: number;
+  coverage_pct?: number | null;
+  agent_pct_of_covered?: number | null;
+  suppressed_reason?: string | null;
   month: string;
-  total_commits: number;
-  agent_commits: number;
-  agent_pct: number;
   tier_counts?: Record<string, unknown>;
 }
 
-/** Monthly agent-share trend across the indexed commit window. */
+/**
+ * Monthly attribution trend across the indexed commit window.
+ *
+ * ``enabled`` is false, with every figure empty, when AI attribution is off
+ * for the repository.
+ */
 export interface AgentTrendResponse {
-  buckets: AgentTrendBucket[];
-  total_commits: number;
-  agent_commits: number;
-  agent_pct: number;
+  total_commits?: number;
+  agent_commits?: number;
+  human_attested_commits?: number;
+  unknown_commits?: number;
+  coverage_pct?: number | null;
+  agent_pct_of_covered?: number | null;
+  suppressed_reason?: string | null;
+  enabled?: boolean;
+  coverage_floor_pct: number;
+  buckets?: AgentTrendBucket[];
   agent_names?: Record<string, unknown>[];
 }
 
@@ -352,6 +369,37 @@ export interface CallersCalleesResponse {
   relations?: SymbolRelationGroup[];
 }
 
+/** An entity a card or view points at. Never a URL; the renderer resolves it. */
+export interface CardRef {
+  type: "repo" | "file" | "symbol" | "module" | "component" | "commit" | "change" | "decision";
+  id: string;
+  start_line?: number | null;
+  end_line?: number | null;
+}
+
+export interface ChangeAuthor {
+  name: string;
+  email: string;
+}
+
+/** The evidence checklist (``repowise.core.changes.evidence``), versioned. */
+export interface ChangeEvidence {
+  schema_version: number;
+  change_id?: string | null;
+  revspec?: string | null;
+  generated_at: string;
+  index_commit?: string | null;
+  items: EvidenceItem[];
+}
+
+/** Status counts of a change's kept checklist; never builds one. */
+export interface ChangeEvidenceSummary {
+  generated_at: string;
+  ok: number;
+  attention: number;
+  unknown: number;
+}
+
 /** The Kamei change-shape features the risk model scores. */
 export interface ChangeFeaturesResponse {
   la: number;
@@ -361,6 +409,89 @@ export interface ChangeFeaturesResponse {
   ns: number;
   entropy: number;
   exp: number | null;
+}
+
+export interface ChangeFile {
+  path: string;
+  added: number;
+  deleted: number;
+}
+
+/** Forge facts from a metadata source; ``None`` means unknown. */
+export interface ChangeForgeMetadata {
+  source?: string | null;
+  reviewers?: string[] | null;
+  approvals?: number | null;
+  labels?: string[] | null;
+  linked_issues?: string[] | null;
+}
+
+/** ``pr`` | ``change_id`` | ``merge`` | ``commit``, first that applies. */
+export interface ChangeIdentity {
+  kind: string;
+  value: string;
+}
+
+export interface ChangeListItem {
+  schema_version: number;
+  id: string;
+  identity: ChangeIdentity;
+  shape: string;
+  forge: string;
+  forge_ref?: string | null;
+  title: string;
+  merged_at?: string | null;
+  head_sha: string;
+  author: ChangeAuthor;
+  commit_count: number;
+  files_changed: number;
+  lines_added: number;
+  lines_deleted: number;
+  category: string;
+  provenance?: ChangeProvenance | null;
+  evidence_summary?: ChangeEvidenceSummary | null;
+}
+
+export interface ChangeListResponse {
+  items: ChangeListItem[];
+  total: number;
+  limit: number;
+  offset: number;
+  attribution: boolean;
+  checklists_built?: ChecklistsBuilt | null;
+}
+
+/** Three-state AI provenance over the change's commits, with its coverage. */
+export interface ChangeProvenance {
+  label: string;
+  agent_commits: number;
+  human_attested_commits: number;
+  unknown_commits: number;
+  coverage?: number | null;
+}
+
+export interface ChangeRecord {
+  schema_version: number;
+  id: string;
+  identity: ChangeIdentity;
+  shape: string;
+  forge: string;
+  forge_ref?: string | null;
+  title: string;
+  merged_at?: string | null;
+  head_sha: string;
+  author: ChangeAuthor;
+  commit_count: number;
+  files_changed: number;
+  lines_added: number;
+  lines_deleted: number;
+  category: string;
+  provenance?: ChangeProvenance | null;
+  commits: string[];
+  files: ChangeFile[];
+  metadata: ChangeForgeMetadata;
+  evidence?: ChangeEvidence | null;
+  evidence_building?: boolean;
 }
 
 export interface ChangelogEntryModel {
@@ -398,6 +529,29 @@ export interface ChatArtifactEnvelope {
   created_at?: string | null;
 }
 
+/** A file a tool result cited, and that result's ``artifact_id``. */
+export interface ChatCitation {
+  file_path: string;
+  symbol_name?: string | null;
+  start_line?: number | null;
+  end_line?: number | null;
+  artifact_id?: string | null;
+  ref?: CardRef | null;
+}
+
+/**
+ * A number the answer states. Offsets are UTF-16 units into ``answer``;
+ * a verified figure carries the ``artifact_id`` of the result holding it.
+ */
+export interface ChatFigure {
+  text: string;
+  start: number;
+  end: number;
+  verified: boolean;
+  artifact_id?: string | null;
+  derived?: boolean;
+}
+
 export interface ChatMessageResponse {
   id: string;
   conversation_id: string;
@@ -422,6 +576,53 @@ export interface ChatRequest {
   context?: ChatPageContext | null;
 }
 
+export interface ChatSessionMessageRequest {
+  message: string;
+  idempotency_key?: string | null;
+  context?: ChatPageContext | null;
+  stream?: boolean;
+  provider?: string | null;
+  model?: string | null;
+}
+
+/** Open a session, or resume the one ``(namespace, external_ref)`` names. */
+export interface ChatSessionOpenRequest {
+  repo_id: string;
+  scope?: "repo" | "workspace";
+  namespace?: string;
+  external_ref?: string | null;
+  title?: string | null;
+  policy?: ChatSessionPolicyRequest | null;
+}
+
+/**
+ * Limits a caller asks for. Each may only narrow the server's default
+ * session policy; a wider value is refused.
+ */
+export interface ChatSessionPolicyRequest {
+  tool_allowlist?: string[] | null;
+  max_tool_loops?: number | null;
+  max_turns?: number | null;
+  max_output_tokens?: number | null;
+  max_turn_tokens?: number | null;
+  max_session_tokens?: number | null;
+  audience?: "engineer" | "business" | null;
+}
+
+export interface ChatSessionResponse {
+  id: string;
+  repository_id: string;
+  title: string;
+  scope: "repo" | "workspace";
+  namespace?: string | null;
+  external_ref?: string | null;
+  created?: boolean;
+  policy?: Record<string, unknown>;
+  turns?: number;
+  input_tokens?: number;
+  output_tokens?: number;
+}
+
 /**
  * One composer chip. ``source`` lets a client rank a measured question
  * above the static tier it already ships.
@@ -438,6 +639,47 @@ export interface ChatSuggestion {
  */
 export interface ChatSuggestionsResponse {
   suggestions?: ChatSuggestion[];
+}
+
+export interface ChatToolTraceEntry {
+  name: string;
+  summary: string;
+  ok: boolean;
+  basis: string;
+  origin?: string | null;
+}
+
+export interface ChatTurnResultResponse {
+  conversation_id: string;
+  message_id?: string | null;
+  user_message_id?: string | null;
+  answer: string;
+  stop_reason: "answered" | "loop_cap" | "token_budget" | "turn_budget" | "refused" | "cancelled" | "error";
+  provider: string;
+  model: string;
+  citations?: ChatCitation[];
+  cards?: Record<string, unknown>[];
+  views?: Record<string, unknown>[];
+  figures?: ChatFigure[];
+  diagnostics?: Record<string, number>;
+  tool_trace?: ChatToolTraceEntry[];
+  follow_ups?: ChatSuggestion[];
+  usage?: ChatTurnUsage;
+  error?: string | null;
+  replayed?: boolean;
+}
+
+/** Null token counts mean the provider reported none. */
+export interface ChatTurnUsage {
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  model_calls?: number;
+}
+
+/** How many of the changes a list's filters match keep an evidence checklist. */
+export interface ChecklistsBuilt {
+  built: number;
+  changes: number;
 }
 
 /**
@@ -473,6 +715,17 @@ export interface ClaudeMdResponse {
   generated_at: string;
   repo_name: string;
   sections?: string[];
+}
+
+export interface CloudEvent {
+  specversion: string;
+  id: string;
+  source: string;
+  type: string;
+  time: string;
+  datacontenttype: string;
+  subject?: string | null;
+  data: Record<string, unknown>;
 }
 
 /**
@@ -519,6 +772,7 @@ export interface CommitDetailResponse {
   agent_name?: string | null;
   agent_autonomy_tier?: number | null;
   agent_confidence?: string | null;
+  attribution?: string | null;
   drivers?: RiskDriverResponse[];
   agent_channel?: string | null;
   files?: CommitFileResponse[];
@@ -629,6 +883,7 @@ export interface CommitResponse {
   agent_name?: string | null;
   agent_autonomy_tier?: number | null;
   agent_confidence?: string | null;
+  attribution?: string | null;
 }
 
 /**
@@ -643,7 +898,9 @@ export interface CommitStatsResponse {
   total_commits: number;
   high_priority_count: number;
   fix_commit_count: number;
-  agent_commit_count: number;
+  agent_commit_count?: number | null;
+  agent_pct_of_covered?: number | null;
+  attribution_coverage_pct?: number | null;
   avg_entropy: number;
   risk_histogram?: RiskHistogramBucket[];
   moderate_cut?: number | null;
@@ -1342,6 +1599,31 @@ export interface EpisodeSummary {
   still_true?: string | null;
 }
 
+export interface EventListResponse {
+  events: CloudEvent[];
+  snapshot_runs?: number;
+  empty_reason?: "baseline_only" | "no_match" | "nothing_moved" | null;
+  empty_note?: string | null;
+}
+
+/** One checklist row: what was found, whether it needs a look, how it is known. */
+export interface EvidenceItem {
+  kind: string;
+  label: string;
+  status: "ok" | "attention" | "unknown";
+  basis: "measured" | "inferred" | "declared" | "unresolved";
+  value?: unknown;
+  details: Record<string, unknown>[];
+  source: string;
+  line?: EvidenceLine | null;
+}
+
+/** An item's value as a message key and its parameters, for a client to word. */
+export interface EvidenceLine {
+  key: string;
+  params: Record<string, unknown>;
+}
+
 /** The top-ranked evidence row, slimmed for list rows. */
 export interface EvidencePreview {
   source: string;
@@ -1780,9 +2062,11 @@ export interface GitMetadataResponse {
   commit_count_capped?: boolean;
   original_path?: string | null;
   test_gap?: boolean | null;
-  agent_commit_count?: number;
+  agent_commit_count?: number | null;
   agent_authored_pct?: number | null;
-  agent_tier_counts?: Record<string, unknown>;
+  agent_tier_counts?: Record<string, unknown> | null;
+  attribution_coverage?: number | null;
+  agent_share_suppressed?: string | null;
 }
 
 export interface GitSummaryResponse {
@@ -2301,20 +2585,6 @@ export interface OkResponse {
   ok?: boolean;
 }
 
-/**
- * How much coding-agent activity lands on the files this person owns.
- *
- * Aggregated from the per-file agent-provenance rollup (GitMetadata) over
- * the owner's primary-owned files — agent identity per commit lives on the
- * commits surface, the per-file rollup only carries counts and tiers.
- */
-export interface OwnerAgentCollab {
-  files_with_agent_commits: number;
-  agent_commit_count: number;
-  agent_share_pct: number | null;
-  tier_counts?: Record<string, unknown>;
-}
-
 export interface OwnerCoAuthor {
   name: string;
   email: string | null;
@@ -2343,6 +2613,7 @@ export interface OwnerListEntry {
   dead_code_files_owned: number;
   dead_code_lines_owned: number;
   commit_count_90d: number | null;
+  commit_count_90d_at_least?: number | null;
   last_commit_at: string | null;
   bus_factor_risk_files: number;
 }
@@ -2364,6 +2635,7 @@ export interface OwnerProfileResponse {
   dead_code_files_owned: number;
   dead_code_lines_owned: number;
   commit_count_90d: number | null;
+  commit_count_90d_at_least?: number | null;
   last_commit_at: string | null;
   first_commit_at: string | null;
   bus_factor_risk_files: number;
@@ -2375,7 +2647,6 @@ export interface OwnerProfileResponse {
   co_authors: OwnerCoAuthor[];
   co_authors_total?: number;
   commit_categories: Record<string, unknown>;
-  agent_collab?: OwnerAgentCollab | null;
 }
 
 export interface OwnershipEntry {
@@ -2384,6 +2655,63 @@ export interface OwnershipEntry {
   owner_pct: number | null;
   file_count: number;
   is_silo: boolean;
+}
+
+export interface PackageUsageComponent {
+  name: string;
+  files: number;
+  owners: string[];
+}
+
+export interface PackageUsageDeclaration {
+  package_key: string;
+  version?: string | null;
+  declared_in: string;
+  dev?: boolean;
+}
+
+/** One module the file imports and how it was matched to the package. */
+export interface PackageUsageModule {
+  name: string;
+  mapping: "declared" | "inferred";
+}
+
+export interface PackageUsageReachability {
+  state: string;
+  basis: string;
+}
+
+/** Where one package is imported: sites, components, owner teams, reachability. */
+export interface PackageUsageResponse {
+  package: string;
+  ecosystem?: string | null;
+  declared: PackageUsageDeclaration[];
+  summary: PackageUsageSummary;
+  sites: PackageUsageSite[];
+  components: PackageUsageComponent[];
+  method: Record<string, string>;
+  note?: string | null;
+}
+
+/** One file importing the package. */
+export interface PackageUsageSite {
+  path: string;
+  modules: PackageUsageModule[];
+  symbols: string[];
+  mapping: "declared" | "inferred";
+  line?: number | null;
+  statement?: string | null;
+  component?: string | null;
+  owners: string[];
+  owner_counts?: Record<string, number> | null;
+  reachability: PackageUsageReachability;
+}
+
+export interface PackageUsageSummary {
+  files: number;
+  components: number;
+  reachability: Record<string, number>;
+  inferred_files: number;
 }
 
 /** PATCH body for /lookup/notes. ``None`` clears the note. */
@@ -2493,7 +2821,7 @@ export interface PatchCoverageBranches {
 
 export interface PatchCoverageFile {
   file_path: string;
-  status: "measured" | "not_in_report" | "no_line_data" | "no_coverable_changes";
+  status: "measured" | "not_in_report" | "no_line_data" | "no_coverable_changes" | "stale_file";
   changed_line_count: number;
   coverable_line_count: number;
   covered_line_count: number;
@@ -2511,6 +2839,7 @@ export interface PatchCoverageFileCounts {
   not_in_report: number;
   no_line_data: number;
   no_coverable_changes: number;
+  stale_file: number;
   out_of_scope: number;
 }
 
@@ -3262,15 +3591,60 @@ export interface SecuritySummaryResponse {
   scanned_at?: string | null;
 }
 
+export interface SelectionProvenance {
+  provider?: string | null;
+  model?: string | null;
+  base_url?: string | null;
+}
+
 export interface SetActiveProviderRequest {
   provider: string;
   model?: string | null;
+  base_url?: string | null;
   repo_id?: string | null;
 }
 
 export interface SetApiKeyRequest {
   api_key: string;
   repo_id?: string | null;
+}
+
+/** One change in reading order; ``signals`` holds each signal that fired. */
+export interface Suspect {
+  id: string;
+  ref?: string | null;
+  title: string;
+  merged_at?: string | null;
+  category: string;
+  head_sha: string;
+  files_changed: number;
+  provenance?: string | null;
+  rank: number;
+  signals: Record<string, SuspectSignal>;
+}
+
+export interface SuspectSignal {
+  rank: number;
+  evidence: string[];
+}
+
+/** A symptom and the window to rank the changes merged in. */
+export interface SuspectsRequest {
+  symptom?: string;
+  files?: string[];
+  trace?: string;
+  since?: string | null;
+  until?: string | null;
+  limit?: number;
+}
+
+export interface SuspectsResponse {
+  window: Record<string, string>;
+  candidates: number;
+  texts_missing?: number;
+  symptom_files?: string[];
+  suspects: Suspect[];
+  note: string;
 }
 
 /**

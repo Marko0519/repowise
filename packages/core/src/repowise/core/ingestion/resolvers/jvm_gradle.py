@@ -11,6 +11,7 @@ re-export facade for backwards compatibility).
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 from functools import lru_cache
@@ -183,6 +184,33 @@ def _module_dir(repo_path: Path, module_name: str, overrides: dict[str, str]) ->
 # ---------------------------------------------------------------------------
 # Source-set discovery
 # ---------------------------------------------------------------------------
+
+# ``<module>/src/<set>/kotlin/``: the source-set directory a JVM file sits in.
+_SOURCE_SET_DIR_RE = re.compile(r"(?:^|/)src/[^/]+/(?=(?:java|kotlin)/)")
+
+
+def source_set_dir(path: str) -> str | None:
+    """The source-set directory *path* sits in (``okio/src/jvmMain/``), or None."""
+    match = _SOURCE_SET_DIR_RE.search(path)
+    return path[: match.end()] if match else None
+
+
+def declaration_rank(importer: str, candidate: str, is_expect: bool) -> int:
+    """How directly *importer* sees *candidate*, one of a name's declarations; lowest wins.
+
+    Kotlin Multiplatform declares a name once per source set: ``expect`` in
+    common code and ``actual`` in each platform's. A file binds its own source
+    set's declaration (0), else the ``expect`` its set depends on (1); any
+    other declaration (2) is a guess, since source-set dependencies are not
+    read: an intermediate set's ``actual`` may be visible, another platform's
+    is not. Ties keep their order. Outside multiplatform only a declaration in
+    the file's own source set (``src/main`` over ``src/test``) moves ahead.
+    """
+    own = source_set_dir(importer)
+    if own is not None and source_set_dir(candidate) == own:
+        return 0
+    return 1 if is_expect else 2
+
 
 def _is_test_source_set(name: str) -> bool:
     lower = name.lower()
@@ -397,7 +425,7 @@ def build_jvm_gradle_index(
         ss_map: dict[str, SourceSet] = {ss.name: ss for ss in source_sets}
         project = JvmGradleProject(
             id=module_name or "<root>",
-            root_dir=mod_dir.relative_to(resolved_repo).as_posix() if module_name else "",
+            root_dir=Path(os.path.relpath(mod_dir, repo_path)).as_posix() if module_name else "",
             source_sets=ss_map,
             plugins=plugins,
         )

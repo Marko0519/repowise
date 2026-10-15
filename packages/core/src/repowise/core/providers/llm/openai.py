@@ -42,6 +42,7 @@ from repowise.core.providers.llm.openai_compat import (
     stream_openai_chat,
     translate_openai_errors,
 )
+from repowise.core.providers.llm.specs import PROVIDER_SPECS
 from repowise.core.rate_limiter import RateLimiter
 from repowise.core.reasoning import ReasoningMode, normalize_reasoning
 
@@ -162,6 +163,9 @@ def _openai_temperature(model: str, requested: float) -> float:
     if _supports_openai_reasoning_effort(model):
         return 1.0
     return requested
+
+
+_OPENAI_API_URL = "https://api.openai.com/v1"
 
 
 def _openai_chat_tool_kwargs(model: str, *, has_tools: bool) -> dict[str, Any]:
@@ -285,7 +289,7 @@ class OpenAIProvider(SdkClientOwner, BaseProvider):
 
     Args:
         api_key:   OpenAI API key. Falls back to OPENAI_API_KEY env var.
-        model:     Model identifier. Defaults to gpt-5.6-luna.
+        model:     Model identifier. Defaults to the spec's default_model.
         base_url:  Optional custom base URL for OpenAI-compatible endpoints.
         rate_limiter: Optional RateLimiter instance.
     """
@@ -293,7 +297,7 @@ class OpenAIProvider(SdkClientOwner, BaseProvider):
     def __init__(
         self,
         api_key: str | None = None,
-        model: str = "gpt-5.6-luna",
+        model: str = PROVIDER_SPECS["openai"].default_model,
         base_url: str | None = None,
         rate_limiter: RateLimiter | None = None,
         cost_tracker: CostTracker | None = None,
@@ -306,7 +310,7 @@ class OpenAIProvider(SdkClientOwner, BaseProvider):
             )
         resolved_base_url = base_url or os.environ.get("OPENAI_BASE_URL")
         self._api_key = resolved_key
-        self._base_url = resolved_base_url or "https://api.openai.com/v1"
+        self._base_url = resolved_base_url or _OPENAI_API_URL
         loopback = bool(resolved_base_url and _is_loopback_url(resolved_base_url))
 
         def _new_client() -> AsyncOpenAI:
@@ -441,6 +445,10 @@ class OpenAIProvider(SdkClientOwner, BaseProvider):
             "messages": full_messages,
             "stream": True,
         }
+        if self._base_url == _OPENAI_API_URL:
+            # Without it the stream carries no usage chunk. Only the hosted API
+            # is asked: an OpenAI-compatible server may reject the field.
+            kwargs["stream_options"] = {"include_usage": True}
         if tools:
             kwargs["tools"] = tools
         kwargs.update(_openai_chat_tool_kwargs(self._model, has_tools=bool(tools)))

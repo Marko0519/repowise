@@ -26,10 +26,11 @@ it and repowise does not write it. `No` means the surface does not exist
 for that agent. `Indexing` is `Yes` when the agent's own CLI can run as the
 LLM that writes the index, selected by its provider id (`claude_cli`, for
 example). It is separate from the tier: it says nothing about the session.
+
 `Attribution` is `Yes` when repowise can record the agent's edits as they
-happen, an opt-in set by `attribution.capture` and `attribution.agents`.
-Every agent's own git-ai notes, Agent Trace files and commit trailers are
-read either way.
+happen, an opt-in set by `attribution.capture` and `attribution.agents`. Every
+agent's own git-ai notes, Agent Trace files and commit trailers are read
+either way.
 
 | Agent | Tier | MCP | Hooks | Skills | Commands | Instructions | Transcripts | Indexing | Attribution |
 |---|---|---|---|---|---|---|---|---|---|
