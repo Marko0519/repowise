@@ -84,7 +84,12 @@ async def _health_items(session: AsyncSession, repo_id: str) -> tuple[list[dict]
         HealthFinding.status == "open",
         HealthFinding.file_path.not_in(_test_paths(repo_id)),
         HealthFinding.biomarker_type.not_in(excluded_types()),
-        ungated("health", HealthFinding.file_path, HealthFinding.biomarker_type),
+        # Ranks areas by summed impact, as hotspots do, and names a history
+        # marker only when nothing an edit can fix is there: history is
+        # already context here, so it stays in the sum.
+        ungated(
+            "health", HealthFinding.file_path, HealthFinding.biomarker_type, hold_history=False
+        ),
     )
     rows = (
         await session.execute(
@@ -381,7 +386,7 @@ def _decision_source(decision_health: dict) -> SourceResult:
 
     def lane(key: str) -> list[DecisionAttentionInput]:
         return [
-            DecisionAttentionInput(id=d.id, title=d.title)
+            DecisionAttentionInput(id=d.id, title=d.title, source=getattr(d, "source", ""))
             for d in decision_health.get(key, []) or []
         ]
 

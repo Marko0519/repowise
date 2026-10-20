@@ -100,29 +100,24 @@ async def list_health_files(
     total = len(filtered)
     page = filtered[offset : offset + limit]
     summary = fields == "summary"
-    # Two reads, and ``summary`` needs only the narrow one. The full row's
-    # dominant-cause lead is reduced from *every* open finding (this repo: 10,740
-    # rows, 1.66 MB of ``details_json`` hydrated to reach four attributes), while
-    # the performance lens needs only the perf dimension (697 rows). A caller
-    # that does not print the lead should not pay for the wide read to compute
-    # it — the map is exactly that caller, and it is the biggest request the
-    # page makes.
+    # The full row's dominant-cause lead is reduced from *every* open finding
+    # (this repo: 10,740 rows, 1.66 MB of ``details_json`` hydrated to reach four
+    # attributes). A caller that does not print the lead should not pay for the
+    # wide read to compute it — the map is exactly that caller, and it is the
+    # biggest request the page makes.
     leads: dict[str, dict] = {}
-    if summary:
-        findings = await crud.get_health_findings(session, repo_id, dimension="performance")
-    else:
-        findings = await crud.get_health_findings(session, repo_id)
+    if not summary:
+        # History markers kept: a file's lead names what its score counted, so a
+        # history-only file scoring below 10 still has one.
+        findings = await crud.get_health_findings(session, repo_id, hold_history=False)
         # Leads only for the page's files — enough to carry the top-reason chip
         # and the magnitude tiebreak without loading every finding for every row.
         page_paths = {m.file_path for m in page}
         leads = _leads_by_file([f for f in findings if f.file_path in page_paths])
-    # Per-file performance signal for the map's performance lens: open perf-
-    # finding counts + whether a perf detector ran on the file's language. Colors
-    # the lens by findings/coverage instead of the narrow-band [8,10] score.
-    perf_counts: dict[str, int] = {}
-    for fnd in findings:
-        if (getattr(fnd, "dimension", None) or "defect") == "performance":
-            perf_counts[fnd.file_path] = perf_counts.get(fnd.file_path, 0) + 1
+    # Per-file performance signal for the map's performance lens: causes in the
+    # default queue (what the performance headline leads with) + whether a perf
+    # detector ran on the file's language, instead of the narrow-band score.
+    queued = {r.file_path: r.queued for r in await crud.performance_file_rollups(session, repo_id)}
     lang_by_path = await crud.get_file_language_map(session, repo_id)
     perf_langs = supported_perf_languages()
     return {
@@ -134,7 +129,7 @@ async def list_health_files(
                 _metric_to_dict(
                     m,
                     leads.get(m.file_path),
-                    perf_findings=perf_counts.get(m.file_path, 0),
+                    perf_opportunities=queued.get(m.file_path, 0),
                     perf_analyzed=lang_by_path.get(m.file_path) in perf_langs,
                     summary=summary,
                 ),
@@ -171,26 +166,37 @@ async def file_score_breakdown(
     findings = await crud.get_health_findings(
         session, repo_id, file_path=file_path, include_unverified=True
     )
+    files = {m.file_path: m for m in metrics}
     # The score counts every finding; a gated one is held back from the list
-    # and the breakdown, and ``gated`` says how many.
+    # and the breakdown, and ``gated`` says how many. History markers are held
+    # from the list only: the breakdown and the lead still sum what the score
+    # counted.
+    scored, _ = split_gated(
+        "health",
+        findings,
+        kind="biomarker_type",
+        include_unverified=include_unverified,
+        files=files,
+        hold_history=False,
+    )
     findings, gated = split_gated(
         "health",
         findings,
         kind="biomarker_type",
         include_unverified=include_unverified,
-        files={m.file_path: m for m in metrics},
+        files=files,
     )
     # This drawer opens from a row the reader just saw a score on. Reading it
     # under the other counts would answer a click on 8.5 with a 2.0 and list
     # the findings the page had just said were excluded.
-    metrics, findings, _unscored = project(counts, metrics, findings)
+    metrics, scored, findings, _unscored = project(counts, metrics, scored, findings)
     metric = metrics[0] if metrics else None
     # No breakdown of a score the file does not have (no health dialect for
     # its language): one rebuilt from its findings would read 10.0.
     breakdown = (
         None
         if metric is not None and metric.score is None
-        else _score_breakdown_from_findings(findings)
+        else _score_breakdown_from_findings(scored)
     )
     finding_dicts = await _attach_symbol_ids(
         session, repo_id, [_finding_to_dict(f) for f in findings]
@@ -200,7 +206,7 @@ async def file_score_breakdown(
     )
     return {
         "file_path": file_path,
-        "metric": _metric_to_dict(metric, _primary_and_magnitude(findings)) if metric else None,
+        "metric": _metric_to_dict(metric, _primary_and_magnitude(scored)) if metric else None,
         "breakdown": breakdown,
         "findings": finding_dicts,
         "gated": gated,

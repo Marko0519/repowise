@@ -23,6 +23,7 @@ from repowise.cli.output import notice_console
 from repowise.core.analysis.dead_code.models import DeadCodeFindingData, DeadCodeReport
 from repowise.core.analysis.dead_code.risk_factors import RISK_CAP_CONFIDENCE
 from repowise.core.analysis.dead_code.serving import safe_only_note
+from repowise.core.analysis.finding_registry import preview_lines
 
 #: The floor ``init`` and ``update`` store findings at: they run the analyzer
 #: with its default config, which keeps nothing below this and runs all four
@@ -269,7 +270,7 @@ def dead_code_command(
         assert target.repo_path is not None
         repo_path = target.repo_path
 
-    notices.print(f"[bold]repowise dead-code[/bold] — {repo_path}")
+    notices.print(f"[bold]repowise dead-code[/bold]: {repo_path}")
 
     config: dict = {
         "min_confidence": min_confidence,
@@ -328,7 +329,7 @@ def dead_code_command(
         for f in findings:
             safe = " (cleanup-ready)" if f.safe_to_delete else ""
             name = f"`{f.symbol_name}`" if f.symbol_name else f"`{f.file_path}`"
-            click.echo(f"- [{f.kind.value}] {name} — {f.reason} ({f.confidence:.0%}){safe}")
+            click.echo(f"- [{f.kind.value}] {name}: {f.reason} ({f.confidence:.0%}){safe}")
         if report.hidden_below_threshold:
             click.echo(
                 f"\n> {report.hidden_below_threshold} finding(s) hidden below threshold "
@@ -359,6 +360,13 @@ def dead_code_command(
         )
 
     console.print(table)
+    for line in preview_lines(
+        "dead_code",
+        findings,
+        kind="kind",
+        get=lambda f, k: f.kind.value if k == "kind" else getattr(f, k),
+    ):
+        console.print(f"[dim]{line}[/dim]")
     # confidence_summary is a {"high": N, ...} dict; interpolating it printed a
     # raw Python repr, braces and quotes included, at the end of an otherwise
     # formatted report.
@@ -369,7 +377,7 @@ def dead_code_command(
     )
     console.print(
         f"\nCleanup-candidate lines: [bold]{report.deletable_lines:,}[/bold]"
-        + (f" ({tiers} confidence)" if tiers else "")
+        + (f" · findings by confidence: {tiers}" if tiers else "")
     )
     if report.hidden_below_threshold:
         console.print(
