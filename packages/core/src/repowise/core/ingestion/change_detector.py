@@ -310,38 +310,10 @@ class ChangeDetector:
         makes the same code correct for a diff whose right-hand side *is* the
         working tree.
         """
-        status: Literal["added", "deleted", "modified", "renamed"]
-        old_path: str | None = None
-        new_path: str | None = None
-
         # Paths inside the module, however deep the module sits in the repo.
-        a_path = self._within(item.a_path)
-        b_path = self._within(item.b_path)
-
-        change_type = item.change_type
-        if change_type == "A":
-            status = "added"
-            new_path = b_path
-        elif change_type == "D":
-            status = "deleted"
-            old_path = a_path
-        elif change_type == "R":
-            if a_path and b_path:
-                status = "renamed"
-                old_path = a_path
-                new_path = b_path
-            elif b_path:
-                # Moved into the module from outside it.
-                status = "added"
-                new_path = b_path
-            else:
-                # Moved out of the module.
-                status = "deleted"
-                old_path = a_path
-        else:
-            status = "modified"
-            old_path = a_path
-            new_path = b_path
+        status, old_path, new_path = _classify_change(
+            item.change_type, self._within(item.a_path), self._within(item.b_path)
+        )
 
         path = new_path or old_path or ""
 
@@ -640,6 +612,28 @@ class ChangeDetector:
             renamed=renames,
             modified=modified,
         )
+
+
+_ChangeStatus = Literal["added", "deleted", "modified", "renamed"]
+
+
+def _classify_change(
+    change_type: str, a_path: str | None, b_path: str | None
+) -> tuple[_ChangeStatus, str | None, str | None]:
+    """``(status, old_path, new_path)`` for one git change, paths already in scope."""
+    if change_type == "A":
+        return "added", None, b_path
+    if change_type == "D":
+        return "deleted", a_path, None
+    if change_type != "R":
+        return "modified", a_path, b_path
+    if a_path and b_path:
+        return "renamed", a_path, b_path
+    if b_path:
+        # Moved into the module from outside it.
+        return "added", None, b_path
+    # Moved out of the module.
+    return "deleted", a_path, None
 
 
 def _prefix_in_repo(repo: object, repo_path: Path) -> str:

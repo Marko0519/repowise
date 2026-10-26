@@ -116,3 +116,29 @@ def test_repo_root_behaviour_is_unchanged(repo: Path) -> None:
     (repo / "other" / "x.py").write_text("def outside():\n    return 5\n", encoding="utf-8")
 
     assert _paths(ChangeDetector(repo).get_working_tree_changes()) == {"other/x.py"}
+
+
+def test_a_sibling_sharing_the_prefix_is_outside_the_module(tmp_path: Path) -> None:
+    # Indexing svc/mod must not pick up svc/module, whose path starts with it.
+    r = gitpython.Repo.init(tmp_path)
+    with r.config_writer() as cw:
+        cw.set_value("user", "name", "Alice")
+        cw.set_value("user", "email", "alice@example.com")
+    for d in ("svc/mod", "svc/module"):
+        (tmp_path / d).mkdir(parents=True)
+        (tmp_path / d / "a.py").write_text("def a():\n    return 1\n", encoding="utf-8")
+    r.index.add(["svc/mod/a.py", "svc/module/a.py"])
+    r.index.commit("init")
+    (tmp_path / "svc/module/a.py").write_text("def a():\n    return 2\n", encoding="utf-8")
+    r.index.add(["svc/module/a.py"])
+    r.index.commit("touch the sibling")
+    r.close()
+
+    (tmp_path / "svc/module/a.py").write_text("def a():\n    return 3\n", encoding="utf-8")
+    (tmp_path / "svc/module/new.py").write_text("def n():\n    return 1\n", encoding="utf-8")
+    module = tmp_path / "svc" / "mod"
+    detector = ChangeDetector(module)
+
+    assert detector.get_working_tree_changes() == []
+    assert detector.get_changed_files("HEAD~1", "HEAD") == []
+    assert has_working_tree_changes(module) is False

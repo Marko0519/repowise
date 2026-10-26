@@ -33,7 +33,7 @@ def nested(tmp_path: Path) -> Path:
 
 
 def test_a_root_relative_path_that_exists_is_live(nested: Path) -> None:
-    liveness = _FileLiveness(nested / "svc" / "module")
+    liveness = _FileLiveness(nested / "svc" / "module", git_root_keyed=True)
 
     assert liveness.is_live("svc/module/a.py")
     assert liveness.is_live("other/b.py")
@@ -44,14 +44,27 @@ def test_a_module_relative_path_is_still_live(nested: Path) -> None:
 
 
 def test_a_genuinely_missing_path_is_still_dead(nested: Path) -> None:
-    liveness = _FileLiveness(nested / "svc" / "module")
+    assert not _FileLiveness(nested / "svc" / "module").is_live("gone.py")
+    git_keyed = _FileLiveness(nested / "svc" / "module", git_root_keyed=True)
+    assert not git_keyed.is_live("svc/module/gone.py")
 
-    assert not liveness.is_live("svc/module/gone.py")
-    assert not liveness.is_live("gone.py")
+
+def test_an_index_relative_path_is_not_resolved_against_the_git_root(nested: Path) -> None:
+    # A deleted module file must not look live because the repo root has a
+    # file of the same name.
+    (nested / "a.py").write_text("root = 1\n", encoding="utf-8")
+    (nested / "svc" / "module" / "a.py").unlink()
+    r = gitpython.Repo(nested)
+    r.git.rm("--cached", "-q", "svc/module/a.py")
+    r.close()
+
+    assert not _FileLiveness(nested / "svc" / "module").is_live("a.py")
+    git_keyed = _FileLiveness(nested / "svc" / "module", git_root_keyed=True)
+    assert not git_keyed.is_live("svc/module/a.py")
+    assert git_keyed.is_live("a.py")
 
 
 def test_the_repo_root_behaves_as_before(nested: Path) -> None:
-    liveness = _FileLiveness(nested)
-
-    assert liveness.is_live("other/b.py")
-    assert not liveness.is_live("nope.py")
+    for liveness in (_FileLiveness(nested), _FileLiveness(nested, git_root_keyed=True)):
+        assert liveness.is_live("other/b.py")
+        assert not liveness.is_live("nope.py")
