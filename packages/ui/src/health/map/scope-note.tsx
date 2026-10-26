@@ -16,7 +16,7 @@ import type { MapScope } from "./types";
 import type { MapCanvasLabels } from "./canvas-labels";
 
 const ACTION =
-  "pointer-events-auto rounded px-1 text-[var(--color-accent-primary)] underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent-primary)] disabled:cursor-wait disabled:opacity-60";
+  "pointer-events-auto rounded px-1 text-[var(--color-accent-primary)] underline-offset-2 hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-focus-ring)] disabled:cursor-wait disabled:opacity-60";
 
 const plural = (n: number, one: string, many: string) => (n === 1 ? one : many);
 
@@ -50,8 +50,8 @@ function Action({
 function omittedText(scope: MapScope): string {
   const causes = scope.omitted.performanceFiles;
   if (causes == null) return `${scope.omitted.files.toLocaleString()} not drawn`;
-  if (causes === 0) return "every file with an open cause is drawn";
-  return `${causes.toLocaleString()} ${plural(causes, "file", "files")} with open causes not drawn`;
+  if (causes === 0) return "every file with a cause worth fixing now is drawn";
+  return `${causes.toLocaleString()} ${plural(causes, "file", "files")} with causes worth fixing now not drawn`;
 }
 
 function HeldToggle({

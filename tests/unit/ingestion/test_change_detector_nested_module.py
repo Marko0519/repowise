@@ -64,6 +64,29 @@ def test_changes_outside_the_module_are_ignored(repo: Path) -> None:
     assert has_working_tree_changes(repo / MODULE) is False
 
 
+def test_repowe_generated_editor_file_inside_module_is_ignored(repo: Path) -> None:
+    module = repo / MODULE
+    from repowise.core.generation.editor_files.base import BaseEditorFileGenerator
+    from repowise.core.generation.editor_files.claude_md import ClaudeMdGenerator
+
+    generated = module / ".claude" / "CLAUDE.md"
+    generated.parent.mkdir(parents=True)
+    tag = ClaudeMdGenerator.marker_tag
+    generated.write_text(
+        ClaudeMdGenerator.user_placeholder
+        + BaseEditorFileGenerator.MARKER_START_FMT.format(tag=tag)
+        + "\nLast indexed: today\n"
+        + BaseEditorFileGenerator.MARKER_END_FMT.format(tag=tag)
+        + "\n",
+        encoding="utf-8",
+    )
+
+    detector = ChangeDetector(module)
+
+    assert detector.get_working_tree_changes() == []
+    assert has_working_tree_changes(module) is False
+
+
 def test_untracked_files_inside_the_module_are_relative_to_it(repo: Path) -> None:
     module = repo / MODULE
     (module / "pkg").mkdir()
