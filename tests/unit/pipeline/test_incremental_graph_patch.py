@@ -383,6 +383,35 @@ def test_unsupported_language_falls_back(tmp_path: Path) -> None:
     _assert_equals_full(tree, patched, tmp_path)
 
 
+def test_module_level_call_edit_matches_full_build(tmp_path: Path) -> None:
+    tree = tmp_path / "module-calls"
+    files = {
+        "util.py": "def first():\n    return 1\n\ndef second():\n    return 2\n",
+        "service.py": "from util import first, second\nfirst()\n",
+    }
+    _write(tree, files)
+    original = build_repo_graph(tree, [], collect_sources=True)[2]
+    original_module_calls = {
+        (source, target)
+        for source, target, attrs in original.graph().edges(data=True)
+        if source == "service.py::__module__" and attrs.get("edge_type") == "calls"
+    }
+    assert original_module_calls == {("service.py::__module__", "util.py::first")}
+
+    (tree / "service.py").write_text(files["service.py"].replace("\nfirst()", "\nsecond()"))
+
+    patched = _patched(tree, _seed_rows(original))
+
+    assert patched.patch_plan.eligible, patched.patch_plan.reason
+    patched_module_calls = {
+        (source, target)
+        for source, target, attrs in patched.graph().edges(data=True)
+        if source == "service.py::__module__" and attrs.get("edge_type") == "calls"
+    }
+    assert patched_module_calls == {("service.py::__module__", "util.py::second")}
+    _assert_equals_full(tree, patched, tmp_path / "module-calls-oracle")
+
+
 def test_go_package_clause_change_falls_back(
     tmp_path: Path,
 ) -> None:

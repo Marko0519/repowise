@@ -64,6 +64,7 @@ class ScopedBuildMixin:
             if parsed is None:
                 continue
             owned.add(path)
+            owned.add(f"{path}::__module__")
             owned.update(sym.id for sym in parsed.symbols)
         return owned
 
