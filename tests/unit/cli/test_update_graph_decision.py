@@ -44,6 +44,7 @@ def test_rebuild_index_records_graph_decision_in_run_state(monkeypatch, tmp_path
         working_tree_diffs=[object()],
         head="abc",
         base_ref="abc",
+        full_generation=False,
         config=SimpleNamespace(git_changed=False, health_changed=False, generation_changed=False),
         renderer_changed=False,
         analyzer_changed=False,
