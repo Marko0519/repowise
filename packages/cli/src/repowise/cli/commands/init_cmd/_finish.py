@@ -47,13 +47,17 @@ def persist_index(run: InitRun) -> None:
         persist_callback = recorder.rebind(steps)
         # Indeterminate, announced so the stage is never silent.
         persist_callback.on_phase_start("persist", None)
-        from repowise.core.pipeline.incremental.graph_seed import invalidate_seed_edge_cache
+        from repowise.core.pipeline.incremental.feature import incremental_graph_enabled
 
-        invalidate_seed_edge_cache(run.repo_path)
+        cache_incremental_graph = incremental_graph_enabled()
+        if cache_incremental_graph:
+            from repowise.core.pipeline.incremental.graph_seed import invalidate_seed_edge_cache
+
+            invalidate_seed_edge_cache(run.repo_path)
         run_async(persist_result(run.result, run.repo_path, persist_callback, recorder.table))
         persist_callback.on_phase_done("persist")
         # Seed the opt-in incremental graph update from a sealed sequential cache.
-        if run.result.graph_builder is not None:
+        if cache_incremental_graph and run.result.graph_builder is not None:
             from repowise.core.pipeline.incremental.graph_seed import save_seed_edge_cache
 
             run_async(save_seed_edge_cache(run.repo_path, run.result.graph_builder))

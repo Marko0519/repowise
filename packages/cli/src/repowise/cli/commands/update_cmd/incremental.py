@@ -7,7 +7,6 @@ routing core log output through the CLI ``console``.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Any
 
@@ -124,6 +123,7 @@ def _rebuild_graph_and_git(
     file_count, git_meta_map)``.
     """
     from repowise.core.pipeline.incremental import rebuild_graph_and_git
+    from repowise.core.pipeline.incremental.feature import incremental_graph_enabled
 
     return run_async(
         rebuild_graph_and_git(
@@ -141,7 +141,7 @@ def _rebuild_graph_and_git(
             timings=timings,
             # Experimental: re-resolve only the changed files when that is
             # provably equivalent to a rebuild (see pipeline.incremental.surface).
-            patch_graph=os.environ.get("REPOWISE_INCREMENTAL_GRAPH") == "1",
+            patch_graph=incremental_graph_enabled(),
         )
     )
 

@@ -89,6 +89,10 @@ A sealed `.repowise/graph_seed_edges.pkl` snapshot avoids re-reading seed edges
 from the database when it matches the repository ID, edge count and parser
 fingerprint. A missing or stale snapshot falls back safely; the first update
 after enabling the feature may need a full rebuild to create the snapshot.
+When the flag is unset, Repowise does not read, write, or invalidate the
+incremental graph seed or resolved-import caches. On an opted-in update,
+`state.json` records `graph_update` with the selected `patch`/`full` path,
+whether the feature was enabled, the fallback reason, and the patched file list.
 When phase timings are enabled, `rebuild.graph` is the overall graph stage;
 `rebuild.graph.patch` and `rebuild.graph.full` identify which graph-build path
 actually ran. The log states the fallback reason when an attempted patch is

@@ -674,7 +674,9 @@ async def _write(ctx: IncrementalPersist) -> None:
         if timings is not None:
             timings.stop("persist")
 
-    if persisted:
+    from .feature import incremental_graph_enabled
+
+    if persisted and incremental_graph_enabled():
         # The DB transaction is committed and its engine is disposed before we
         # refresh this optional, sealed snapshot. If the write fails, the next
         # update safely reloads the authoritative rows from SQL.

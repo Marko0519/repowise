@@ -112,6 +112,54 @@ async def test_update_graph_converges_with_init_graph(tmp_path: Path) -> None:
     )
 
 
+async def test_opt_out_update_does_not_touch_incremental_graph_caches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _build_git_repo(tmp_path)
+    index_dir = tmp_path / ".repowise"
+    index_dir.mkdir()
+    seed = index_dir / "graph_seed_edges.pkl"
+    resolutions = index_dir / "resolved_imports.pkl"
+    seed.write_bytes(b"existing seed snapshot")
+    resolutions.write_bytes(b"existing resolution snapshot")
+    monkeypatch.delenv("REPOWISE_INCREMENTAL_GRAPH", raising=False)
+
+    await rebuild_graph_and_git(
+        tmp_path,
+        [SimpleNamespace(path="a.py", status="modified")],
+        cfg={},
+        exclude_patterns=[],
+        git_tier="full",
+    )
+
+    assert seed.read_bytes() == b"existing seed snapshot"
+    assert resolutions.read_bytes() == b"existing resolution snapshot"
+
+
+async def test_update_does_not_touch_incremental_caches_when_opted_out(
+    tmp_path: Path, monkeypatch
+) -> None:
+    _build_git_repo(tmp_path)
+    index = tmp_path / ".repowise"
+    index.mkdir()
+    seed_path = index / "graph_seed_edges.pkl"
+    resolutions_path = index / "resolved_imports.pkl"
+    seed_path.write_bytes(b"existing seed is untouched when opt-out")
+    resolutions_path.write_bytes(b"existing resolutions are untouched when opt-out")
+    monkeypatch.delenv("REPOWISE_INCREMENTAL_GRAPH", raising=False)
+
+    await rebuild_graph_and_git(
+        tmp_path,
+        [SimpleNamespace(path="a.py", status="modified")],
+        cfg={},
+        exclude_patterns=[],
+        git_tier="full",
+    )
+
+    assert seed_path.read_bytes() == b"existing seed is untouched when opt-out"
+    assert resolutions_path.read_bytes() == b"existing resolutions are untouched when opt-out"
+
+
 async def test_missing_patch_seed_is_invalidated_before_full_rebuild(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
