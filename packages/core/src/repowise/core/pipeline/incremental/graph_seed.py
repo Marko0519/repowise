@@ -153,6 +153,199 @@ async def load_seed_edges(repo_path: Any) -> dict[str, list] | None:
     return {"nodes": cache["nodes"], "edges": cache["edges"]}
 
 
+async def load_seed_edges_for_reconciliation(repo_path: Any) -> dict[str, list] | None:
+    """Load a DB-current snapshot for preserving rows omitted by a full build.
+
+    Unlike :func:`load_seed_edges`, this does not require the current parser
+    fingerprint or a prior opt-in. The snapshot is never used to build the
+    graph; it is only a source of attributes for rows the DB deliberately kept
+    when a file could not be read or parsed.
+    """
+    root = Path(repo_path).resolve()
+    stamp = await _database_stamp(root)
+    if stamp is None or stamp[1] == 0:
+        return None
+    cache_path = root / ".repowise" / _CACHE_NAME
+    try:
+        cache = load_sealed_pickle(cache_path, domain=_CACHE_NAME)
+    except FileNotFoundError:
+        return None
+    except Exception as exc:
+        log.warning("graph_seed_reconciliation_unavailable", error=str(exc))
+        return None
+    if not _seed_identity_matches(
+        cache,
+        root=root,
+        repo_id=stamp[0],
+        edge_count=stamp[1],
+        fingerprint=stamp[2],
+    ):
+        return None
+    return {"nodes": cache["nodes"], "edges": cache["edges"]}
+
+
+async def _persisted_graph_ids(
+    repo_path: Path, repo_id: str
+) -> tuple[set[str], set[tuple[str, str, str]]]:
+    from sqlalchemy import select
+
+    from repowise.core.persistence import create_engine, create_session_factory, get_session
+    from repowise.core.persistence.database import resolve_db_url
+    from repowise.core.persistence.models import GraphEdge, GraphNode
+
+    engine = create_engine(resolve_db_url(repo_path))
+    try:
+        async with get_session(create_session_factory(engine)) as session:
+            edge_result = await session.stream(
+                select(
+                    GraphEdge.source_node_id,
+                    GraphEdge.target_node_id,
+                    GraphEdge.edge_type,
+                ).where(GraphEdge.repository_id == repo_id)
+            )
+            edge_ids = {
+                (source, target, edge_type)
+                async for source, target, edge_type in edge_result
+            }
+            await edge_result.close()
+            node_result = await session.stream(
+                select(GraphNode.node_id).where(GraphNode.repository_id == repo_id)
+            )
+            node_ids = {node_id async for node_id, in node_result}
+            await node_result.close()
+            return node_ids, edge_ids
+    finally:
+        await engine.dispose()
+
+
+def restore_unparsed_graph_rows(
+    graph_builder: Any,
+    previous_snapshot: dict[str, list],
+    parsed_paths: set[str],
+) -> None:
+    """Keep prior graph rows for traversed files the full build could not parse."""
+    graph = graph_builder.graph()
+    unparsed_paths = set(getattr(graph_builder, "traversed_file_paths", set())) - parsed_paths
+    if not unparsed_paths:
+        return
+
+    previous_nodes = {
+        node_id: attrs
+        for node_id, attrs in previous_snapshot["nodes"]
+        if attrs.get("file_path") in unparsed_paths
+    }
+    previous_edges = [
+        (source, target, attrs)
+        for source, target, attrs in previous_snapshot["edges"]
+        if source in previous_nodes
+    ]
+    required_nodes = {
+        node_id
+        for source, target, _attrs in previous_edges
+        for node_id in (source, target)
+        if node_id not in graph
+    }
+    if required_nodes - previous_nodes.keys():
+        previous_nodes.update(
+            (node_id, attrs)
+            for node_id, attrs in previous_snapshot["nodes"]
+            if node_id in required_nodes
+        )
+    if required_nodes - previous_nodes.keys():
+        log.warning(
+            "graph_seed_unparsed_rows_unavailable",
+            missing_nodes=len(required_nodes - previous_nodes.keys()),
+        )
+        return
+
+    for source, target, attrs in previous_edges:
+        existing = graph.get_edge_data(source, target)
+        if existing is not None and existing.get("edge_type") != attrs.get("edge_type"):
+            log.warning(
+                "graph_seed_unparsed_edge_conflict",
+                source=source,
+                target=target,
+            )
+            return
+
+    for node_id in required_nodes:
+        graph.add_node(node_id, **previous_nodes[node_id])
+    restored_edges = 0
+    for source, target, attrs in previous_edges:
+        existing = graph.get_edge_data(source, target)
+        if existing is not None:
+            continue
+        graph.add_edge(source, target, **attrs)
+        restored_edges += 1
+    if restored_edges:
+        log.info(
+            "graph_seed_unparsed_rows_restored",
+            files=len(unparsed_paths),
+            edges=restored_edges,
+        )
+
+
+async def _restore_persisted_graph_rows(
+    repo_path: Path,
+    repo_id: str,
+    graph: Any,
+    previous_snapshot: dict[str, list] | None,
+) -> bool:
+    """Restore DB-retained rows from a verified prior snapshot after a full build."""
+    node_ids, edge_ids = await _persisted_graph_ids(repo_path, repo_id)
+    current_edge_ids = {
+        (source, target, attrs.get("edge_type", "imports"))
+        for source, target, attrs in graph.edges(data=True)
+    }
+    missing_edge_ids = edge_ids - current_edge_ids
+    missing_node_ids = node_ids - set(graph.nodes)
+    if not missing_edge_ids and not missing_node_ids:
+        return current_edge_ids == edge_ids
+    if previous_snapshot is None:
+        log.warning(
+            "graph_seed_cache_rows_unavailable",
+            missing_edges=len(missing_edge_ids),
+            missing_nodes=len(missing_node_ids),
+        )
+        return False
+
+    previous_nodes = {
+        node_id: attrs
+        for node_id, attrs in previous_snapshot["nodes"]
+        if node_id in missing_node_ids
+    }
+    previous_edges = {
+        (source, target, attrs.get("edge_type", "imports")): (source, target, attrs)
+        for source, target, attrs in previous_snapshot["edges"]
+        if (source, target, attrs.get("edge_type", "imports")) in missing_edge_ids
+    }
+    if missing_node_ids - previous_nodes.keys() or missing_edge_ids - previous_edges.keys():
+        log.warning(
+            "graph_seed_cache_rows_unavailable",
+            missing_edges=len(missing_edge_ids - previous_edges.keys()),
+            missing_nodes=len(missing_node_ids - previous_nodes.keys()),
+        )
+        return False
+
+    for node_id in missing_node_ids:
+        graph.add_node(node_id, **previous_nodes[node_id])
+    for source, target, attrs in previous_edges.values():
+        graph.add_edge(source, target, **attrs)
+
+    restored_edge_ids = {
+        (source, target, attrs.get("edge_type", "imports"))
+        for source, target, attrs in graph.edges(data=True)
+    }
+    if restored_edge_ids != edge_ids:
+        log.warning(
+            "graph_seed_cache_rows_mismatch",
+            graph_edges=len(restored_edge_ids),
+            db_edges=len(edge_ids),
+        )
+        return False
+    return True
+
+
 async def save_seed_edge_cache(repo_path: Any, graph_builder: Any) -> None:
     """Save a sealed full graph snapshot after the database commit succeeds."""
     from repowise.core.ingestion.parse_cache import parser_fingerprint
@@ -174,12 +367,27 @@ async def save_seed_edge_cache(repo_path: Any, graph_builder: Any) -> None:
             "edges": [(source, target, dict(attrs)) for source, target, attrs in graph.edges(data=True)],
         }
         if len(payload["edges"]) != edge_count:
-            log.warning(
-                "graph_seed_cache_edge_count_mismatch",
-                graph_edges=len(payload["edges"]),
-                db_edges=edge_count,
-            )
-            return
+            previous_snapshot = getattr(graph_builder, "previous_seed_edges", None)
+            if previous_snapshot is None or not await _restore_persisted_graph_rows(
+                root, repo_id, graph, previous_snapshot
+            ):
+                log.warning(
+                    "graph_seed_cache_edge_count_mismatch",
+                    graph_edges=graph.number_of_edges(),
+                    db_edges=edge_count,
+                )
+                return
+            payload["nodes"] = [(node, dict(attrs)) for node, attrs in graph.nodes(data=True)]
+            payload["edges"] = [
+                (source, target, dict(attrs)) for source, target, attrs in graph.edges(data=True)
+            ]
+            if len(payload["edges"]) != edge_count:
+                log.warning(
+                    "graph_seed_cache_edge_count_mismatch",
+                    graph_edges=len(payload["edges"]),
+                    db_edges=edge_count,
+                )
+                return
         dump_sealed_pickle(root / ".repowise" / _CACHE_NAME, payload, domain=_CACHE_NAME)
         log.info("graph_seed_cache_saved", nodes=len(payload["nodes"]), edges=edge_count)
     except Exception as exc:

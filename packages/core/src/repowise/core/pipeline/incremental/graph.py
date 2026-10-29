@@ -666,18 +666,23 @@ async def _load_update_seed(
     enabled: bool,
     timings: PhaseTimings | None,
     log: LogFn,
-) -> Any | None:
+) -> tuple[Any | None, Any | None]:
     """Load and invalidate the optional seed before any opted-in update write."""
     if not enabled:
-        return None
-    from .graph_seed import invalidate_seed_edge_cache, load_seed_edges
+        return None, None
+    from .graph_seed import (
+        invalidate_seed_edge_cache,
+        load_seed_edges,
+        load_seed_edges_for_reconciliation,
+    )
 
     with timed(timings, "rebuild.seed_load"):
         seed_edges = await load_seed_edges(repo_path)
+        previous_seed_edges = seed_edges or await load_seed_edges_for_reconciliation(repo_path)
     if seed_edges is None:
         log("[yellow]Full graph rebuild: no valid persisted edge snapshot[/yellow]")
     invalidate_seed_edge_cache(repo_path)
-    return seed_edges
+    return seed_edges, previous_seed_edges
 
 
 async def _prime_graph_metrics(
@@ -747,7 +752,7 @@ async def rebuild_graph_and_git(
     if timings is not None:
         timings.start("rebuild")
 
-    seed_edges = await _load_update_seed(
+    seed_edges, previous_seed_edges = await _load_update_seed(
         repo_path, enabled=patch_graph, timings=timings, log=log
     )
 
@@ -770,6 +775,17 @@ async def rebuild_graph_and_git(
             if path
         },
     )
+    if previous_seed_edges is not None:
+        graph_builder.previous_seed_edges = previous_seed_edges
+        if not getattr(getattr(graph_builder, "patch_plan", None), "eligible", False):
+            from .graph_seed import restore_unparsed_graph_rows
+
+            with timed(timings, "rebuild.seed_reconcile"):
+                restore_unparsed_graph_rows(
+                    graph_builder,
+                    previous_seed_edges,
+                    {pf.file_info.path for pf in parsed_files},
+                )
 
     git_meta_map = await _index_git_metadata(
         repo_path,

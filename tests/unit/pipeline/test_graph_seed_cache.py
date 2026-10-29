@@ -23,6 +23,8 @@ from repowise.core.persistence.models import Repository
 from repowise.core.pipeline.incremental.graph_seed import (
     invalidate_seed_edge_cache,
     load_seed_edges,
+    load_seed_edges_for_reconciliation,
+    restore_unparsed_graph_rows,
     save_seed_edge_cache,
 )
 
@@ -190,6 +192,53 @@ async def test_stale_edge_fingerprint_disables_patch_seed(tmp_path: Path, monkey
         await engine.dispose()
 
 
+async def test_stale_fingerprint_snapshot_remains_available_for_reconciliation(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root, engine, sf = await _repo_db(tmp_path, monkeypatch)
+    try:
+        async with get_session(sf) as session:
+            repo = (await session.execute(select(Repository))).scalar_one()
+            repo.graph_edges_parser_fingerprint = "previous-parser"
+        await save_seed_edge_cache(root, _gb())
+
+        assert await load_seed_edges(root) is None
+        snapshot = await load_seed_edges_for_reconciliation(root)
+
+        assert snapshot is not None
+        assert len(snapshot["edges"]) == 4
+    finally:
+        await engine.dispose()
+
+
+async def test_seed_save_restores_persisted_rows_omitted_from_full_graph(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root, engine, sf = await _repo_db(tmp_path, monkeypatch)
+    try:
+        async with get_session(sf) as session:
+            repo = (await session.execute(select(Repository))).scalar_one()
+            repo.graph_edges_parser_fingerprint = "previous-parser"
+        await save_seed_edge_cache(root, _gb())
+        previous = await load_seed_edges_for_reconciliation(root)
+        assert previous is not None
+
+        async with get_session(sf) as session:
+            repo = (await session.execute(select(Repository))).scalar_one()
+            repo.graph_edges_parser_fingerprint = parser_fingerprint()
+        builder = _gb()
+        builder.graph().remove_edge("a.py", "b.py")
+        builder.previous_seed_edges = previous
+
+        await save_seed_edge_cache(root, builder)
+        snapshot = await load_seed_edges(root)
+
+        assert snapshot is not None
+        assert _seed_identity(snapshot) == _seed_identity(previous)
+    finally:
+        await engine.dispose()
+
+
 async def test_seed_from_prior_opt_in_is_ignored_after_feature_is_disabled(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -214,3 +263,37 @@ def test_invalidation_removes_snapshot_before_update_write(tmp_path: Path) -> No
     invalidate_seed_edge_cache(tmp_path)
 
     assert not cache.exists()
+
+
+def test_full_build_restores_rows_for_unparsed_files_from_prior_snapshot() -> None:
+    previous_graph = nx.DiGraph()
+    previous_graph.add_node("a.py::run", file_path="a.py")
+    previous_graph.add_node("b.py", file_path="b.py")
+    previous_graph.add_edge(
+        "a.py::run",
+        "b.py",
+        edge_type="calls",
+        resolution_origin="same_file",
+        confidence=1.0,
+    )
+    current_graph = nx.DiGraph()
+    current_graph.add_node("b.py", file_path="b.py")
+    builder = SimpleNamespace(
+        graph=lambda: current_graph,
+        traversed_file_paths={"a.py", "b.py"},
+    )
+
+    restore_unparsed_graph_rows(
+        builder,
+        {
+            "nodes": list(previous_graph.nodes(data=True)),
+            "edges": [
+                (source, target, attrs)
+                for source, target, attrs in previous_graph.edges(data=True)
+            ],
+        },
+        {"b.py"},
+    )
+
+    assert current_graph.has_edge("a.py::run", "b.py")
+    assert current_graph.edges["a.py::run", "b.py"]["resolution_origin"] == "same_file"

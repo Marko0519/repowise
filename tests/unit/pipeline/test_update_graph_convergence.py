@@ -18,6 +18,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+import networkx as nx
 import pytest
 
 from repowise.core.ingestion import ASTParser, FileTraverser, GraphBuilder
@@ -195,6 +196,14 @@ async def test_missing_patch_seed_is_invalidated_before_full_rebuild(
         "repowise.core.pipeline.incremental.graph_seed.load_seed_edges",
         missing_seed,
     )
+
+    async def no_previous_seed(_repo_path: Path) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "repowise.core.pipeline.incremental.graph_seed.load_seed_edges_for_reconciliation",
+        no_previous_seed,
+    )
     monkeypatch.setattr(
         "repowise.core.ingestion.git_indexer.GitIndexer.index_changed_files",
         no_changed_files,
@@ -216,6 +225,70 @@ async def test_missing_patch_seed_is_invalidated_before_full_rebuild(
     assert events == ["load_seed", "build_graph"]
     assert not cache.exists()
     assert any("no valid persisted edge snapshot" in message for message in messages)
+
+
+async def test_full_fallback_restores_unparsed_rows_before_metric_recompute(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    graph = nx.DiGraph()
+    graph.add_node("b.py", file_path="b.py")
+    previous_snapshot = {
+        "nodes": [
+            ("a.py::run", {"file_path": "a.py"}),
+            ("b.py", {"file_path": "b.py"}),
+        ],
+        "edges": [("a.py::run", "b.py", {"edge_type": "calls"})],
+    }
+    builder = SimpleNamespace(
+        graph=lambda: graph,
+        traversed_file_paths={"a.py", "b.py"},
+        patch_plan=SimpleNamespace(eligible=False, reason="parser fingerprint mismatch"),
+    )
+    parsed_files = [SimpleNamespace(file_info=SimpleNamespace(path="b.py"))]
+
+    async def missing_seed(_repo_path: Path) -> None:
+        return None
+
+    async def prior_snapshot(_repo_path: Path) -> dict[str, list]:
+        return previous_snapshot
+
+    def full_build(*_args, **_kwargs):
+        return parsed_files, {}, builder, SimpleNamespace(), 2
+
+    async def no_git(*_args, **_kwargs) -> dict:
+        return {}
+
+    async def check_metrics(graph_builder, *_args, **_kwargs) -> None:
+        assert graph_builder.graph().has_edge("a.py::run", "b.py")
+
+    monkeypatch.setattr(
+        "repowise.core.pipeline.incremental.graph.build_repo_graph",
+        full_build,
+    )
+    monkeypatch.setattr(
+        "repowise.core.pipeline.incremental.graph_seed.load_seed_edges",
+        missing_seed,
+    )
+    monkeypatch.setattr(
+        "repowise.core.pipeline.incremental.graph_seed.load_seed_edges_for_reconciliation",
+        prior_snapshot,
+    )
+    monkeypatch.setattr(
+        "repowise.core.pipeline.incremental.graph._index_git_metadata",
+        no_git,
+    )
+    monkeypatch.setattr(
+        "repowise.core.pipeline.incremental.graph._prime_graph_metrics",
+        check_metrics,
+    )
+
+    await rebuild_graph_and_git(
+        tmp_path,
+        [],
+        cfg={},
+        exclude_patterns=[],
+        patch_graph=True,
+    )
 
 
 def test_dynamic_hint_failure_logs_warning_and_does_not_raise(tmp_path: Path) -> None:
