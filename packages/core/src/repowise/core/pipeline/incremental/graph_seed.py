@@ -218,17 +218,9 @@ async def _persisted_graph_ids(
         await engine.dispose()
 
 
-def restore_unparsed_graph_rows(
-    graph_builder: Any,
-    previous_snapshot: dict[str, list],
-    parsed_paths: set[str],
-) -> None:
-    """Keep prior graph rows for traversed files the full build could not parse."""
-    graph = graph_builder.graph()
-    unparsed_paths = set(getattr(graph_builder, "traversed_file_paths", set())) - parsed_paths
-    if not unparsed_paths:
-        return
-
+def _unparsed_snapshot_rows(
+    previous_snapshot: dict[str, list], unparsed_paths: set[str]
+) -> tuple[dict[str, dict], list[tuple]]:
     previous_nodes = {
         node_id: attrs
         for node_id, attrs in previous_snapshot["nodes"]
@@ -239,6 +231,15 @@ def restore_unparsed_graph_rows(
         for source, target, attrs in previous_snapshot["edges"]
         if source in previous_nodes
     ]
+    return previous_nodes, previous_edges
+
+
+def _restore_edge_endpoints(
+    graph: Any,
+    previous_snapshot: dict[str, list],
+    previous_nodes: dict[str, dict],
+    previous_edges: list[tuple],
+) -> set[str] | None:
     required_nodes = {
         node_id
         for source, target, _attrs in previous_edges
@@ -256,7 +257,7 @@ def restore_unparsed_graph_rows(
             "graph_seed_unparsed_rows_unavailable",
             missing_nodes=len(required_nodes - previous_nodes.keys()),
         )
-        return
+        return None
 
     for source, target, attrs in previous_edges:
         existing = graph.get_edge_data(source, target)
@@ -266,7 +267,26 @@ def restore_unparsed_graph_rows(
                 source=source,
                 target=target,
             )
-            return
+            return None
+    return required_nodes
+
+
+def restore_unparsed_graph_rows(
+    graph_builder: Any,
+    previous_snapshot: dict[str, list],
+    parsed_paths: set[str],
+) -> None:
+    """Keep prior graph rows for traversed files the full build could not parse."""
+    graph = graph_builder.graph()
+    unparsed_paths = set(getattr(graph_builder, "traversed_file_paths", set())) - parsed_paths
+    if not unparsed_paths:
+        return
+    previous_nodes, previous_edges = _unparsed_snapshot_rows(previous_snapshot, unparsed_paths)
+    if not previous_edges:
+        return
+    required_nodes = _restore_edge_endpoints(graph, previous_snapshot, previous_nodes, previous_edges)
+    if required_nodes is None:
+        return
 
     for node_id in required_nodes:
         graph.add_node(node_id, **previous_nodes[node_id])
