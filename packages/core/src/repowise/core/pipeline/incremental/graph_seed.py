@@ -71,20 +71,61 @@ async def _database_stamp(repo_path: Path) -> tuple[str, int, str] | None:
         await engine.dispose()
 
 
+def _incremental_cache_is_enabled(root: Path) -> bool:
+    """Whether the last persisted index run opted in to incremental graph state."""
+    try:
+        state = json.loads((root / ".repowise" / "state.json").read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    graph_update = state.get("graph_update")
+    return isinstance(graph_update, dict) and graph_update.get("enabled") is True
+
+
+def _seed_identity_matches(
+    cache: Any,
+    *,
+    root: Path,
+    repo_id: str,
+    edge_count: int,
+    fingerprint: str,
+) -> bool:
+    """Validate the cache schema and the DB identity/stamp fields."""
+    if not isinstance(cache, dict):
+        return False
+    expected = (
+        ("version", _CACHE_VERSION),
+        ("repo_path", str(root)),
+        ("repo_id", repo_id),
+        ("edge_count", edge_count),
+        ("parser_fingerprint", fingerprint),
+    )
+    for key, value in expected:
+        if cache.get(key) != value:
+            log.info("graph_seed_cache_skipped", reason=f"snapshot {key} mismatch")
+            return False
+    for key in ("nodes", "edges"):
+        if not isinstance(cache.get(key), list):
+            log.info("graph_seed_cache_skipped", reason=f"snapshot {key} payload is invalid")
+            return False
+    return True
+
+
 async def load_seed_edges(repo_path: Any) -> dict[str, list] | None:
     """The full persisted graph snapshot, or ``None`` to force a full build."""
     root = Path(repo_path).resolve()
-    try:
-        state = json.loads((root / ".repowise" / "state.json").read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        state = {}
-    graph_update = state.get("graph_update")
-    if not isinstance(graph_update, dict) or graph_update.get("enabled") is not True:
-        log.info("graph_seed_cache_skipped", reason="incremental graph feature was not enabled on the last index")
+    if not _incremental_cache_is_enabled(root):
+        log.info(
+            "graph_seed_cache_skipped",
+            reason="incremental graph feature was not enabled on the last index",
+        )
         return None
 
     stamp = await _database_stamp(root)
-    if stamp is None or stamp[1] == 0:
+    if stamp is None:
+        log.info("graph_seed_cache_skipped", reason="repository is not indexed")
+        return None
+    if stamp[1] == 0:
+        log.info("graph_seed_cache_skipped", reason="repository has no persisted graph edges")
         return None
     repo_id, edge_count, fingerprint = stamp
     from repowise.core.ingestion.parse_cache import parser_fingerprint
@@ -100,24 +141,14 @@ async def load_seed_edges(repo_path: Any) -> dict[str, list] | None:
     except Exception as exc:
         log.warning("graph_seed_cache_unavailable", error=str(exc))
         return None
-    if not isinstance(cache, dict):
-        log.info("graph_seed_cache_skipped", reason="snapshot payload is not a mapping")
+    if not _seed_identity_matches(
+        cache,
+        root=root,
+        repo_id=repo_id,
+        edge_count=edge_count,
+        fingerprint=fingerprint,
+    ):
         return None
-    expected = (
-        ("version", _CACHE_VERSION),
-        ("repo_path", str(root)),
-        ("repo_id", repo_id),
-        ("edge_count", edge_count),
-        ("parser_fingerprint", fingerprint),
-    )
-    for key, value in expected:
-        if cache.get(key) != value:
-            log.info("graph_seed_cache_skipped", reason=f"snapshot {key} mismatch")
-            return None
-    for key in ("nodes", "edges"):
-        if not isinstance(cache.get(key), list):
-            log.info("graph_seed_cache_skipped", reason=f"snapshot {key} payload is invalid")
-            return None
     log.info("graph_seed_cache_hit", nodes=len(cache["nodes"]), edges=len(cache["edges"]))
     return {"nodes": cache["nodes"], "edges": cache["edges"]}
 
