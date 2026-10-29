@@ -519,6 +519,178 @@ pass reads the sources.
     return parsed_files, source_map, graph_builder, repo_structure, len(file_infos)
 
 
+async def _index_git_metadata(
+    repo_path: Any,
+    file_diffs: list,
+    cfg: dict,
+    exclude_patterns: list[str],
+    graph_builder: Any,
+    source_map: dict[str, bytes],
+    *,
+    git_tier: str | None,
+    force_full_git: bool,
+    git_summary_sink: list[Any] | None,
+    idle_decay_sink: dict[str, dict] | None,
+    log: LogFn,
+    timings: PhaseTimings | None,
+) -> dict[str, dict]:
+    """Reindex changed-file history and restore complete co-change graph edges."""
+    from repowise.core.ingestion.git_indexer import GitIndexer
+    from repowise.core.ingestion.git_indexer.tiers import GitIndexTier
+    from repowise.core.pipeline.phases.git import label_co_change_structure
+
+    git_meta_map: dict[str, dict] = {}
+    if timings is not None:
+        timings.start("rebuild.git")
+    try:
+        try:
+            tier = GitIndexTier(git_tier) if git_tier else GitIndexTier.FULL
+        except ValueError:
+            tier = GitIndexTier.FULL
+        git_indexer = GitIndexer(
+            repo_path,
+            commit_limit=cfg.get("commit_limit"),
+            follow_renames=cfg.get("follow_renames", False),
+            exclude_patterns=exclude_patterns or None,
+            tier=tier,
+        )
+        if force_full_git:
+            summary, updated_meta = await git_indexer.index_repo(
+                repo_path.name, on_warning=log
+            )
+            if git_summary_sink is not None:
+                git_summary_sink.append(summary)
+            git_meta_map = {meta["file_path"]: meta for meta in updated_meta}
+            label_co_change_structure(graph_builder, git_meta_map)
+            graph_builder.update_co_change_edges(git_meta_map)
+            graph_builder.co_change_edges_complete = True
+        else:
+            git_meta_map = await _index_changed_git_files(
+                git_indexer,
+                file_diffs,
+                exclude_patterns,
+                graph_builder,
+                source_map,
+                idle_decay_sink=idle_decay_sink,
+                log=log,
+                timings=timings,
+            )
+    except Exception as exc:
+        log(f"[yellow]Git re-index skipped: {exc}[/yellow]")
+        if force_full_git:
+            raise
+    finally:
+        if timings is not None:
+            timings.stop("rebuild.git")
+    return git_meta_map
+
+
+async def _index_changed_git_files(
+    git_indexer: Any,
+    file_diffs: list,
+    exclude_patterns: list[str],
+    graph_builder: Any,
+    source_map: dict[str, bytes],
+    *,
+    idle_decay_sink: dict[str, dict] | None,
+    log: LogFn,
+    timings: PhaseTimings | None,
+) -> dict[str, dict]:
+    """Update changed-file git rows and rebuild co-change edges for the repo."""
+    from repowise.core.pipeline.phases.git import label_co_change_structure
+
+    changed_paths = build_filtered_changed_paths(file_diffs, exclude_patterns)
+    co_change_full: dict[str, list[dict]] = {}
+    updated_meta = await git_indexer.index_changed_files(
+        changed_paths,
+        all_files=set(source_map.keys()),
+        co_change_sink=co_change_full,
+        idle_decay_sink=idle_decay_sink,
+        on_warning=log,
+        timings=timings,
+    )
+    git_meta_map = {meta["file_path"]: meta for meta in updated_meta}
+    label_co_change_structure(graph_builder, git_meta_map)
+    if idle_decay_sink:
+        # Idle rows carry the same column and are persisted on their own path.
+        label_co_change_structure(graph_builder, idle_decay_sink)
+    if co_change_full:
+        graph_builder.update_co_change_edges(
+            {
+                path: {"co_change_partners_json": partners}
+                for path, partners in co_change_full.items()
+            }
+        )
+        graph_builder.co_change_edges_complete = True
+    else:
+        graph_builder.update_co_change_edges(git_meta_map)
+    return git_meta_map
+
+
+def _graph_update_decision(
+    *, enabled: bool, seed_edges: Any | None, patch_plan: Any
+) -> dict[str, Any]:
+    """Persistable summary of why this update patched or rebuilt the graph."""
+    if not enabled:
+        return {
+            "enabled": False,
+            "mode": "full",
+            "reason": "feature disabled",
+            "files": [],
+        }
+    if seed_edges is None:
+        return {
+            "enabled": True,
+            "mode": "full",
+            "reason": "no valid persisted graph snapshot",
+            "files": [],
+        }
+    if getattr(patch_plan, "eligible", False) is True:
+        return {
+            "enabled": True,
+            "mode": "patch",
+            "reason": "dependency surface unchanged",
+            "files": list(patch_plan.scope),
+        }
+    return {
+        "enabled": True,
+        "mode": "full",
+        "reason": getattr(patch_plan, "reason", None) or "patch plan unavailable",
+        "files": [],
+    }
+
+
+async def _load_update_seed(
+    repo_path: Any,
+    *,
+    enabled: bool,
+    timings: PhaseTimings | None,
+    log: LogFn,
+) -> Any | None:
+    """Load and invalidate the optional seed before any opted-in update write."""
+    if not enabled:
+        return None
+    from .graph_seed import invalidate_seed_edge_cache, load_seed_edges
+
+    with timed(timings, "rebuild.seed_load"):
+        seed_edges = await load_seed_edges(repo_path)
+    if seed_edges is None:
+        log("[yellow]Full graph rebuild: no valid persisted edge snapshot[/yellow]")
+    invalidate_seed_edge_cache(repo_path)
+    return seed_edges
+
+
+async def _prime_graph_metrics(
+    graph_builder: Any, timings: PhaseTimings | None, log: LogFn
+) -> None:
+    """Refresh global metrics without failing an otherwise valid update."""
+    try:
+        with timed(timings, "rebuild.metrics"):
+            await graph_builder.compute_metrics_parallel()
+    except Exception as exc:
+        log(f"[yellow]Metric pre-computation skipped: {exc}[/yellow]")
+
+
 async def rebuild_graph_and_git(
     repo_path: Any,
     file_diffs: list,
@@ -575,17 +747,9 @@ async def rebuild_graph_and_git(
     if timings is not None:
         timings.start("rebuild")
 
-    seed_edges = None
-    if patch_graph:
-        from .graph_seed import invalidate_seed_edge_cache, load_seed_edges
-
-        with timed(timings, "rebuild.seed_load"):
-            seed_edges = await load_seed_edges(repo_path)
-        if seed_edges is None:
-            log("[yellow]Full graph rebuild: no valid persisted edge snapshot[/yellow]")
-        # The snapshot is disposable and the database is authoritative. Remove
-        # it before any update write can commit; successful persistence restores it.
-        invalidate_seed_edge_cache(repo_path)
+    seed_edges = await _load_update_seed(
+        repo_path, enabled=patch_graph, timings=timings, log=log
+    )
 
     # Full re-ingest for graph (needed for cascade analysis)
     parsed_files, source_map, graph_builder, repo_structure, file_count = build_repo_graph(
@@ -607,126 +771,30 @@ async def rebuild_graph_and_git(
         },
     )
 
-    # Re-index git metadata for changed files
-    git_meta_map: dict[str, dict] = {}
-    if timings is not None:
-        timings.start("rebuild.git")
-    try:
-        from repowise.core.ingestion.git_indexer import GitIndexer
-        from repowise.core.ingestion.git_indexer.tiers import GitIndexTier
-        from repowise.core.pipeline.phases.git import label_co_change_structure
+    git_meta_map = await _index_git_metadata(
+        repo_path,
+        file_diffs,
+        cfg,
+        exclude_patterns,
+        graph_builder,
+        source_map,
+        git_tier=git_tier,
+        force_full_git=force_full_git,
+        git_summary_sink=git_summary_sink,
+        idle_decay_sink=idle_decay_sink,
+        log=log,
+        timings=timings,
+    )
 
-        try:
-            tier = GitIndexTier(git_tier) if git_tier else GitIndexTier.FULL
-        except ValueError:
-            tier = GitIndexTier.FULL
-        _commit_limit = cfg.get("commit_limit")
-        _follow_renames = cfg.get("follow_renames", False)
-        git_indexer = GitIndexer(
-            repo_path,
-            commit_limit=_commit_limit,
-            follow_renames=_follow_renames,
-            exclude_patterns=exclude_patterns or None,
-            tier=tier,
-        )
-        if force_full_git:
-            summary, updated_meta = await git_indexer.index_repo(repo_path.name, on_warning=log)
-            if git_summary_sink is not None:
-                git_summary_sink.append(summary)
-            git_meta_map = {m["file_path"]: m for m in updated_meta}
-            label_co_change_structure(graph_builder, git_meta_map)
-            graph_builder.update_co_change_edges(git_meta_map)
-            graph_builder.co_change_edges_complete = True
-        else:
-            changed_paths = build_filtered_changed_paths(file_diffs, exclude_patterns)
-            # The full tracked-file set lets the indexer re-run the repo-wide
-            # co-change walk so partners aren't wiped to "[]" for changed files.
-            # The sink captures that walk's FULL per-file partner map: the graph
-            # was just rebuilt from scratch, so co_changes edges must be re-added
-            # for every file (not only the changed ones) or the update graph
-            # diverges from the init graph and the centrality cache can't hit.
-            co_change_full: dict[str, list[dict]] = {}
-            updated_meta = await git_indexer.index_changed_files(
-                changed_paths,
-                all_files=set(source_map.keys()),
-                co_change_sink=co_change_full,
-                idle_decay_sink=idle_decay_sink,
-                on_warning=log,
-                timings=timings,
-            )
-            git_meta_map = {m["file_path"]: m for m in updated_meta}
-            label_co_change_structure(graph_builder, git_meta_map)
-            if idle_decay_sink:
-                # Idle rows carry the same column and are persisted on their own
-                # path, having been serialized before the graph existed.
-                label_co_change_structure(graph_builder, idle_decay_sink)
-            if co_change_full:
-                graph_builder.update_co_change_edges(
-                    {
-                        fp: {"co_change_partners_json": partners}
-                        for fp, partners in co_change_full.items()
-                    }
-                )
-                # Every pair is in the graph, so persistence may sync the stored
-                # pairs repo-wide; the fallback below holds the changed files' only.
-                graph_builder.co_change_edges_complete = True
-            else:
-                graph_builder.update_co_change_edges(git_meta_map)
-    except Exception as exc:
-        log(f"[yellow]Git re-index skipped: {exc}[/yellow]")
-        if force_full_git:
-            raise
-    finally:
-        if timings is not None:
-            timings.stop("rebuild.git")
+    # Global metrics must reflect the patched graph; the persistence upsert gate
+    # avoids rewriting unchanged rows, but the metric values must still be fresh.
+    await _prime_graph_metrics(graph_builder, timings, log)
 
-    # Pre-compute centrality/community metrics with the init path's fan-out
-    # parallelism. Without this, persist_graph_nodes computes the same
-    # metrics lazily one-by-one. Runs after the co-change edge refresh so
-    # the cached subgraphs reflect the final structure. Best-effort: every
-    # metric still falls back to lazy computation.
-    # Global metrics must reflect the patched graph as well. The persistence
-    # layer's upsert gate skips unchanged node rows, but computing all metrics
-    # avoids silently serving stale centrality/community values.
-    try:
-        with timed(timings, "rebuild.metrics"):
-            await graph_builder.compute_metrics_parallel()
-    except Exception as exc:
-        log(f"[yellow]Metric pre-computation skipped: {exc}[/yellow]")
-
-    patch_plan = getattr(graph_builder, "patch_plan", None)
-    if not patch_graph:
-        graph_builder.incremental_graph_decision = {
-            "enabled": False,
-            "mode": "full",
-            "reason": "feature disabled",
-            "files": [],
-        }
-    elif seed_edges is None:
-        graph_builder.incremental_graph_decision = {
-            "enabled": True,
-            "mode": "full",
-            "reason": "no valid persisted graph snapshot",
-            "files": [],
-        }
-    elif patch_plan is not None and patch_plan.eligible:
-        graph_builder.incremental_graph_decision = {
-            "enabled": True,
-            "mode": "patch",
-            "reason": "dependency surface unchanged",
-            "files": list(patch_plan.scope),
-        }
-    else:
-        graph_builder.incremental_graph_decision = {
-            "enabled": True,
-            "mode": "full",
-            "reason": (
-                patch_plan.reason
-                if patch_plan is not None
-                else "patch plan unavailable"
-            ),
-            "files": [],
-        }
+    graph_builder.incremental_graph_decision = _graph_update_decision(
+        enabled=patch_graph,
+        seed_edges=seed_edges,
+        patch_plan=getattr(graph_builder, "patch_plan", None),
+    )
 
     if timings is not None:
         timings.stop("rebuild")

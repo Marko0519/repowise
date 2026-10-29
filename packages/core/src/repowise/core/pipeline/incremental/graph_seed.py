@@ -10,6 +10,7 @@ attributes that are not persisted in the DB.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -73,6 +74,15 @@ async def _database_stamp(repo_path: Path) -> tuple[str, int, str] | None:
 async def load_seed_edges(repo_path: Any) -> dict[str, list] | None:
     """The full persisted graph snapshot, or ``None`` to force a full build."""
     root = Path(repo_path).resolve()
+    try:
+        state = json.loads((root / ".repowise" / "state.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        state = {}
+    graph_update = state.get("graph_update")
+    if not isinstance(graph_update, dict) or graph_update.get("enabled") is not True:
+        log.info("graph_seed_cache_skipped", reason="incremental graph feature was not enabled on the last index")
+        return None
+
     stamp = await _database_stamp(root)
     if stamp is None or stamp[1] == 0:
         return None

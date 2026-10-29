@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -79,6 +80,10 @@ def _seed_identity(snapshot: dict[str, list]) -> set[tuple]:
 async def _repo_db(tmp_path: Path, monkeypatch):
     root = tmp_path / "repo"
     (root / ".repowise").mkdir(parents=True)
+    (root / ".repowise" / "state.json").write_text(
+        json.dumps({"graph_update": {"enabled": True}}),
+        encoding="utf-8",
+    )
     monkeypatch.setenv("REPOWISE_DB_URL", f"sqlite+aiosqlite:///{root / '.repowise' / 'wiki.db'}")
     engine = create_engine(resolve_db_url(root))
     await init_db(engine)
@@ -180,6 +185,22 @@ async def test_stale_edge_fingerprint_disables_patch_seed(tmp_path: Path, monkey
         async with get_session(sf) as session:
             repo = (await session.execute(select(Repository))).scalar_one()
             repo.graph_edges_parser_fingerprint = "old-resolver-fingerprint"
+        assert await load_seed_edges(root) is None
+    finally:
+        await engine.dispose()
+
+
+async def test_seed_from_prior_opt_in_is_ignored_after_feature_is_disabled(
+    tmp_path: Path, monkeypatch
+) -> None:
+    root, engine, _sf = await _repo_db(tmp_path, monkeypatch)
+    try:
+        await save_seed_edge_cache(root, _gb())
+        (root / ".repowise" / "state.json").write_text(
+            json.dumps({"graph_update": {"enabled": False, "mode": "full"}}),
+            encoding="utf-8",
+        )
+
         assert await load_seed_edges(root) is None
     finally:
         await engine.dispose()
