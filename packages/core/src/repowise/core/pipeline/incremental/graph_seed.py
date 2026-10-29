@@ -305,6 +305,50 @@ def restore_unparsed_graph_rows(
         )
 
 
+def _snapshot_rows_for_ids(
+    previous_snapshot: dict[str, list],
+    missing_node_ids: set[str],
+    missing_edge_ids: set[tuple[str, str, str]],
+) -> tuple[dict[str, dict], dict[tuple[str, str, str], tuple]] | None:
+    previous_nodes = {
+        node_id: attrs
+        for node_id, attrs in previous_snapshot["nodes"]
+        if node_id in missing_node_ids
+    }
+    previous_edges = {
+        (source, target, attrs.get("edge_type", "imports")): (source, target, attrs)
+        for source, target, attrs in previous_snapshot["edges"]
+        if (source, target, attrs.get("edge_type", "imports")) in missing_edge_ids
+    }
+    absent_nodes = missing_node_ids - previous_nodes.keys()
+    absent_edges = missing_edge_ids - previous_edges.keys()
+    if absent_nodes or absent_edges:
+        log.warning(
+            "graph_seed_cache_rows_unavailable",
+            missing_edges=len(absent_edges),
+            missing_nodes=len(absent_nodes),
+        )
+        return None
+    return previous_nodes, previous_edges
+
+
+def _restore_snapshot_rows(
+    graph: Any,
+    previous_snapshot: dict[str, list],
+    missing_node_ids: set[str],
+    missing_edge_ids: set[tuple[str, str, str]],
+) -> bool:
+    rows = _snapshot_rows_for_ids(previous_snapshot, missing_node_ids, missing_edge_ids)
+    if rows is None:
+        return False
+    previous_nodes, previous_edges = rows
+    for node_id in missing_node_ids:
+        graph.add_node(node_id, **previous_nodes[node_id])
+    for source, target, attrs in previous_edges.values():
+        graph.add_edge(source, target, **attrs)
+    return True
+
+
 async def _restore_persisted_graph_rows(
     repo_path: Path,
     repo_id: str,
@@ -328,29 +372,8 @@ async def _restore_persisted_graph_rows(
             missing_nodes=len(missing_node_ids),
         )
         return False
-
-    previous_nodes = {
-        node_id: attrs
-        for node_id, attrs in previous_snapshot["nodes"]
-        if node_id in missing_node_ids
-    }
-    previous_edges = {
-        (source, target, attrs.get("edge_type", "imports")): (source, target, attrs)
-        for source, target, attrs in previous_snapshot["edges"]
-        if (source, target, attrs.get("edge_type", "imports")) in missing_edge_ids
-    }
-    if missing_node_ids - previous_nodes.keys() or missing_edge_ids - previous_edges.keys():
-        log.warning(
-            "graph_seed_cache_rows_unavailable",
-            missing_edges=len(missing_edge_ids - previous_edges.keys()),
-            missing_nodes=len(missing_node_ids - previous_nodes.keys()),
-        )
+    if not _restore_snapshot_rows(graph, previous_snapshot, missing_node_ids, missing_edge_ids):
         return False
-
-    for node_id in missing_node_ids:
-        graph.add_node(node_id, **previous_nodes[node_id])
-    for source, target, attrs in previous_edges.values():
-        graph.add_edge(source, target, **attrs)
 
     restored_edge_ids = {
         (source, target, attrs.get("edge_type", "imports"))
