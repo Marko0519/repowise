@@ -17,6 +17,7 @@ from typing import Any
 
 import structlog
 
+from ..index_persistence import IndexWrite, apply_index_persistence
 from .analysis import (
     persist_analysis,
 )
@@ -84,20 +85,25 @@ from .sweeps import (
     _SWEPT_GENERATED_PAGE_TYPES,
     _sweep_stale_generated_pages,
     _symbol_names_by_file,
+    clear_template_model_names,
     sweep_absent_cycle_pages,
     sweep_absent_symbol_spotlights,
+    sweep_deselected_file_keyed_pages,
     sweep_deselected_pages,
     sweep_retired_pages,
+    sweep_store_hygiene,
     sweep_superseded_generated_pages,
 )
 from .tombstones import (
     _SPOTLIGHT_PATHS_PER_QUERY,
     _STALE_ID_CHUNK,
+    TOMBSTONE_RETENTION,
     _log,
     mark_page_ids_stale,
     mark_stale_pages,
     mark_tombstone_pages,
     reconcile_full_index_scope,
+    sweep_expired_tombstones,
     tombstone_absent_file_pages,
     tombstone_candidates,
     tombstone_file_pages_outside_scope,
@@ -221,9 +227,11 @@ async def persist_pipeline_result(
         getattr(result, "authoritative_page_types", None),
         getattr(result, "preserved_page_ids", None),
     )
-    # Rows of a page type that no longer exists at all. Independent of what
-    # this run produced, so it runs on every path rather than only here.
-    swept_page_ids += await sweep_retired_pages(session, repo_id)
+    # Retired types, deselected file-keyed pages, expired tombstones. Independent
+    # of what this run produced, so they run on every path rather than only here.
+    swept_page_ids += await sweep_store_hygiene(
+        session, repo_id, getattr(result, "parsed_files", None)
+    )
 
     # Placement depends on the whole page set, so it is computed here rather
     # than during generation, after the sweep has retired anything stale.
@@ -238,5 +246,12 @@ async def persist_pipeline_result(
         graph_nodes=result.graph_builder.graph().number_of_nodes(),
         symbols=symbol_count,
         git_files=len(result.git_metadata_list),
+    )
+    await apply_index_persistence(
+        session,
+        repo_id,
+        IndexWrite(
+            "full", result.parsed_files, traversed_paths=frozenset(current_graph_file_paths)
+        ),
     )
     return swept_page_ids

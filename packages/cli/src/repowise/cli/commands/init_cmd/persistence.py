@@ -37,6 +37,11 @@ from repowise.core.index_scope import (
     stamp_index_scope,
 )
 from repowise.core.ingestion.git_indexer import GIT_HISTORY_VERSION, GIT_HISTORY_VERSION_KEY
+from repowise.core.pipeline.index_persistence import (
+    IndexWrite,
+    apply_index_persistence,
+    publish_index_persistence,
+)
 from repowise.core.repo_config import config_dependency_fingerprints
 
 logger = structlog.get_logger(__name__)
@@ -157,7 +162,7 @@ async def persist_result(
         timed,
         tombstone_absent_file_pages,
     )
-    from repowise.core.pipeline.persist import persist_symbol_analysis
+    from repowise.core.pipeline.persist import persist_symbol_analysis, sweep_store_hygiene
 
     engine, sf, _repo_id = await open_repo_db(repo_path, repo_name=result.repo_name)
 
@@ -226,6 +231,17 @@ async def persist_result(
                 result.generated_pages,
                 getattr(result, "authoritative_page_types", None),
                 getattr(result, "preserved_page_ids", None),
+            )
+            swept_page_ids += await sweep_store_hygiene(
+                session, repo.id, getattr(result, "parsed_files", None)
+            )
+            await apply_index_persistence(
+                session,
+                repo.id,
+                IndexWrite(
+                    "full",
+                    result.parsed_files,
+                ),
             )
         else:
             swept_page_ids = await persist_pipeline_result(
@@ -323,6 +339,7 @@ async def persist_result(
     # stopped short of them reported a different span per run mode.
     if progress is not None:
         progress.on_phase_done("persist")
+    await publish_index_persistence(persisted_repo_id, repo_path)
 
 
 # ---------------------------------------------------------------------------

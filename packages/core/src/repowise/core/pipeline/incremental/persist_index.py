@@ -13,6 +13,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from repowise.core.pipeline.index_persistence import (
+    IndexWrite,
+    apply_index_persistence,
+    index_persistence,
+    publish_index_persistence,
+)
 from repowise.core.pipeline.phase_timing import PhaseTimings, timed
 from repowise.core.pipeline.step_runner import PersistRun, Step, run_steps
 
@@ -45,6 +51,9 @@ class IncrementalPersist(PersistRun):
     reconcile_full_scope: bool = False
     full_generation_page_ids: set[str] | None = None
     vector_store: Any | None = None
+
+    traversed_paths: frozenset[str] | None = None
+    pruned_paths: set[str] = field(default_factory=set)
 
     session: Any = None
     repo_id: str = ""
@@ -82,6 +91,7 @@ async def reconcile_scope(ctx: IncrementalPersist) -> None:
             current_graph_paths,
             current_git_paths,
         )
+    ctx.traversed_paths = frozenset(current_graph_paths)
 
 
 async def reconcile_generation_scope(ctx: IncrementalPersist) -> None:
@@ -103,11 +113,13 @@ async def sweep_retired(ctx: IncrementalPersist) -> None:
         sweep_absent_cycle_pages,
         sweep_absent_symbol_spotlights,
         sweep_deselected_pages,
-        sweep_retired_pages,
+        sweep_store_hygiene,
     )
 
     with timed(ctx.timings, "persist.sweeps"):
-        ctx.swept_page_ids = await sweep_retired_pages(ctx.session, ctx.repo_id)
+        # File-keyed pages among these may carry embeddings, hence both lists.
+        hygiene = await sweep_store_hygiene(ctx.session, ctx.repo_id, ctx.parsed_files)
+        ctx.swept_page_ids = list(hygiene)
         # Same reasoning as the retirement sweep above: this path never
         # regenerates a cycle page, so asking the rebuilt graph whether the
         # cycle still exists is the only way a fixed cycle's page can ever be
@@ -120,7 +132,7 @@ async def sweep_retired(ctx: IncrementalPersist) -> None:
             ctx.session, ctx.repo_id, ctx.graph_builder
         )
         # Unlike the pages above, these may carry embeddings.
-        ctx.deselected_page_ids = await sweep_deselected_pages(
+        deselected = await sweep_deselected_pages(
             ctx.session,
             ctx.repo_id,
             ctx.parsed_files,
@@ -128,7 +140,8 @@ async def sweep_retired(ctx: IncrementalPersist) -> None:
             _generation_config(ctx.repo_path),
             ctx.git_meta_map,
         )
-        ctx.swept_page_ids += ctx.deselected_page_ids
+        ctx.swept_page_ids += deselected
+        ctx.deselected_page_ids = hygiene + deselected
 
 
 def _generation_config(repo_path: Any) -> Any:
@@ -339,10 +352,28 @@ async def prune_deleted(ctx: IncrementalPersist) -> None:
             else {pf.file_info.path for pf in ctx.parsed_files or []}
         ),
         health_report=ctx.partial_health_report,
+        pruned=ctx.pruned_paths,
         skip=ctx.skip,
         log=ctx.log,
         degraded=ctx.degraded,
         timings=ctx.timings,
+    )
+
+
+async def persist_plugin_records(ctx: IncrementalPersist) -> None:
+    if not index_persistence.all():
+        return
+    await apply_index_persistence(
+        ctx.session,
+        ctx.repo_id,
+        IndexWrite(
+            "incremental",
+            ctx.parsed_files,
+            changed_paths=tuple(ctx.changed_paths),
+            deleted_paths=tuple(sorted(ctx.pruned_paths)),
+            traversed_paths=ctx.traversed_paths,
+            degraded=tuple(ctx.degraded or []),
+        ),
     )
 
 
@@ -411,6 +442,8 @@ INCREMENTAL_STEPS: tuple[Step, ...] = (
     Step("Decision purge", purge_retired_decisions),
     # Reports its own failures, one sub-step at a time.
     Step("Deleted-file prune", prune_deleted, guarded=False),
+    # Unguarded and last: plugins see the final rows, and a raise rolls back the update.
+    Step("Plugin records", persist_plugin_records, guarded=False),
 )
 
 
@@ -593,7 +626,7 @@ async def persist_incremental_index(
         full_generation_page_ids=full_generation_page_ids,
         vector_store=vector_store,
         log=log or _noop_log,
-        degraded=degraded,
+        degraded=[] if degraded is None else degraded,
         failed_steps=failed_steps,
         timings=timings,
     )
@@ -684,3 +717,5 @@ async def _write(ctx: IncrementalPersist) -> None:
 
         with timed(timings, "persist.graph_seed_cache"):
             await save_seed_edge_cache(ctx.repo_path, ctx.graph_builder)
+
+    await publish_index_persistence(ctx.repo_id, Path(ctx.repo_path))
